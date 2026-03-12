@@ -1,10 +1,10 @@
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "./generated/prisma/client"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -195,17 +195,6 @@ model Room {
 
   building        Building        @relation(fields: [buildingId], references: [id])
   scheduleEntries ScheduleEntry[]
-  qrCode          RoomQRCode?
-}
-
-model RoomQRCode {
-  id           String   @id @default(cuid())
-  roomId       String   @unique
-  permanentUrl String   @unique
-  qrImageData  String
-  generatedAt  DateTime @default(now())
-
-  room         Room     @relation(fields: [roomId], references: [id])
 }
 
 model AcademicYear {

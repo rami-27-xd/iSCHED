@@ -2,8 +2,7 @@
 
 import * as React from 'react'
 import { usePathname } from 'next/navigation'
-import { Menu, CalendarDays } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { Menu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Sheet,
@@ -20,8 +19,6 @@ import { Topbar } from '@/components/layout/topbar'
 
 export interface DashboardShellProps {
   children: React.ReactNode
-  /** Page title displayed in the topbar */
-  title: string
   userRole: string
   userName?: string
   userEmail?: string
@@ -31,15 +28,27 @@ export interface DashboardShellProps {
 // DashboardShell
 // ---------------------------------------------------------------------------
 
+const PAGE_TITLES: Record<string, string> = {
+  '/dashboard': 'Dashboard',
+  '/dashboard/schedules': 'Schedules',
+  '/dashboard/faculty': 'Faculty',
+  '/dashboard/rooms': 'Rooms',
+  '/dashboard/subjects': 'Subjects',
+  '/dashboard/sections': 'Sections',
+  '/dashboard/analytics': 'Analytics',
+  '/dashboard/users': 'Users',
+  '/dashboard/settings': 'Settings',
+}
+
 export function DashboardShell({
   children,
-  title,
   userRole,
   userName,
   userEmail,
 }: DashboardShellProps) {
   const [mobileOpen, setMobileOpen] = React.useState(false)
   const pathname = usePathname()
+  const title = PAGE_TITLES[pathname] ?? 'iSched'
 
   // Close mobile sidebar on route change
   React.useEffect(() => {

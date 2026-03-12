@@ -1,55 +1,22 @@
 import * as React from 'react'
-import {
-  Inbox,
-  Search,
-  FileX2,
-  CalendarX2,
-  Users,
-  type LucideIcon,
-} from 'lucide-react'
+import { Inbox, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-// ---------------------------------------------------------------------------
-// Icon lookup
-// ---------------------------------------------------------------------------
-
-const iconMap: Record<string, LucideIcon> = {
-  Inbox,
-  Search,
-  FileX2,
-  CalendarX2,
-  Users,
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface EmptyStateProps {
-  /** Lucide icon name from the lookup map */
-  icon?: string
-  /** Heading text */
+  icon?: LucideIcon
   title: string
-  /** Supporting description */
   description?: string
-  /** Optional call-to-action (e.g. a Button) */
   children?: React.ReactNode
   className?: string
 }
 
-// ---------------------------------------------------------------------------
-// EmptyState
-// ---------------------------------------------------------------------------
-
 export function EmptyState({
-  icon = 'Inbox',
+  icon: Icon = Inbox,
   title,
   description,
   children,
   className,
 }: EmptyStateProps) {
-  const Icon = iconMap[icon] ?? Inbox
-
   return (
     <div
       className={cn(

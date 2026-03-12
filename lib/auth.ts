@@ -44,6 +44,6 @@ export const ROLE_PERMISSIONS = {
 } as const
 
 export function hasPermission(role: UserRole, permission: string): boolean {
-  const perms = ROLE_PERMISSIONS[role]
-  return perms.includes('*' as any) || perms.includes(permission as any)
+  const perms: readonly string[] = ROLE_PERMISSIONS[role]
+  return perms.includes('*') || perms.includes(permission)
 }

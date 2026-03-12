@@ -10,6 +10,7 @@ export interface PageHeaderProps {
   /** Optional description shown below the title */
   description?: string
   /** Optional right-side action area (buttons, filters, etc.) */
+  action?: React.ReactNode
   children?: React.ReactNode
 }
 
@@ -17,7 +18,8 @@ export interface PageHeaderProps {
 // PageHeader
 // ---------------------------------------------------------------------------
 
-export function PageHeader({ title, description, children }: PageHeaderProps) {
+export function PageHeader({ title, description, action, children }: PageHeaderProps) {
+  const actionContent = action ?? children
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex flex-col gap-1">
@@ -29,8 +31,8 @@ export function PageHeader({ title, description, children }: PageHeaderProps) {
         )}
       </div>
 
-      {children && (
-        <div className="flex shrink-0 items-center gap-2">{children}</div>
+      {actionContent && (
+        <div className="flex shrink-0 items-center gap-2">{actionContent}</div>
       )}
     </div>
   )

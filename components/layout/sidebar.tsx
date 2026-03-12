@@ -11,7 +11,6 @@ import {
   BookOpen,
   GraduationCap,
   BarChart3,
-  QrCode,
   UserCog,
   Settings,
   type LucideIcon,
@@ -91,12 +90,6 @@ const navItems: NavItem[] = [
     title: 'Analytics',
     href: '/dashboard/analytics',
     icon: BarChart3,
-    roles: ['SUPER_ADMIN', 'DEPARTMENT_CHAIR'],
-  },
-  {
-    title: 'QR Codes',
-    href: '/dashboard/qr-codes',
-    icon: QrCode,
     roles: ['SUPER_ADMIN', 'DEPARTMENT_CHAIR'],
   },
   {
