@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server"
-import { auth } from "@clerk/nextjs/server"
+import { getAuthenticatedUser } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 
 export async function GET(req: Request) {
   try {
-    const { userId } = await auth()
-    if (!userId) {
+    const user = await getAuthenticatedUser()
+    if (!user) {
       return NextResponse.json(apiError("Unauthorized"), { status: 401 })
     }
 

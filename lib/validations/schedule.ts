@@ -12,6 +12,7 @@ export const CreateScheduleEntrySchema = z.object({
   day: z.enum(['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY']),
   startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  set: z.enum(['A', 'B']).nullable().optional(),
 }).refine(data => data.startTime < data.endTime, {
   message: 'Start time must be before end time',
   path: ['startTime'],
@@ -49,7 +50,7 @@ export const CreateSubjectSchema = z.object({
   title: z.string().min(1, 'Subject title is required'),
   units: z.number().min(1).max(6),
   hoursPerWeek: z.number().min(1).max(12),
-  type: z.enum(['LECTURE', 'LABORATORY', 'HYBRID']),
+  type: z.enum(['LECTURE', 'LABORATORY']),
   departmentId: z.string().min(1),
   requiredRoomType: z.array(z.enum(['LECTURE_ROOM', 'LABORATORY', 'COMPUTER_LAB', 'LECTURE_LAB'])).default([]),
 })

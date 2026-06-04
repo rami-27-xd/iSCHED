@@ -20,11 +20,9 @@ export const DAY_LABELS: Record<string, string> = {
 }
 
 export const ROLE_LABELS: Record<string, string> = {
-  SUPER_ADMIN: 'Super Admin',
-  DEPARTMENT_CHAIR: 'Department Chair',
-  PROGRAM_HEAD: 'Program Head',
+  SUPER_ADMIN: 'Department Chair',
+  ADMIN: 'Program Chair',
   FACULTY: 'Faculty',
-  STUDENT: 'Student',
 }
 
 export const ROOM_TYPE_LABELS: Record<string, string> = {
@@ -37,7 +35,6 @@ export const ROOM_TYPE_LABELS: Record<string, string> = {
 export const SUBJECT_TYPE_LABELS: Record<string, string> = {
   LECTURE: 'Lecture',
   LABORATORY: 'Laboratory',
-  HYBRID: 'Hybrid',
 }
 
 export const SCHEDULE_STATUS_LABELS: Record<string, string> = {

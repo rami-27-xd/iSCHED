@@ -11,6 +11,8 @@ interface ScheduleEntry {
   endTime: string
 }
 
+type SaveStatus = "idle" | "saving" | "saved" | "error"
+
 interface ScheduleStore {
   // State
   selectedEntryId: string | null
@@ -20,6 +22,8 @@ interface ScheduleStore {
   currentScheduleId: string | null
   currentSemesterId: string | null
   viewMode: "calendar" | "list"
+  saveStatus: SaveStatus
+  lastSavedAt: Date | null
 
   // Actions
   selectEntry: (id: string | null) => void
@@ -29,6 +33,8 @@ interface ScheduleStore {
   setCurrentSchedule: (scheduleId: string | null) => void
   setCurrentSemester: (semesterId: string | null) => void
   setViewMode: (mode: "calendar" | "list") => void
+  setSaveStatus: (status: SaveStatus) => void
+  markSaved: () => void
 }
 
 export const useScheduleStore = create<ScheduleStore>((set) => ({
@@ -39,6 +45,8 @@ export const useScheduleStore = create<ScheduleStore>((set) => ({
   currentScheduleId: null,
   currentSemesterId: null,
   viewMode: "calendar",
+  saveStatus: "idle",
+  lastSavedAt: null,
 
   selectEntry: (id) => set({ selectedEntryId: id }),
 
@@ -46,11 +54,11 @@ export const useScheduleStore = create<ScheduleStore>((set) => ({
     set((state) => {
       const next = new Map(state.pendingChanges)
       next.set(id, { ...(next.get(id) ?? {}), ...changes })
-      return { pendingChanges: next, isDirty: true }
+      return { pendingChanges: next, isDirty: true, saveStatus: "idle" }
     }),
 
   resetChanges: () =>
-    set({ pendingChanges: new Map(), isDirty: false }),
+    set({ pendingChanges: new Map(), isDirty: false, saveStatus: "idle" }),
 
   setGenerating: (isGenerating) => set({ isGenerating }),
 
@@ -61,4 +69,14 @@ export const useScheduleStore = create<ScheduleStore>((set) => ({
     set({ currentSemesterId: semesterId }),
 
   setViewMode: (mode) => set({ viewMode: mode }),
+
+  setSaveStatus: (status) => set({ saveStatus: status }),
+
+  markSaved: () =>
+    set({
+      pendingChanges: new Map(),
+      isDirty: false,
+      saveStatus: "saved",
+      lastSavedAt: new Date(),
+    }),
 }))

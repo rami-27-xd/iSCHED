@@ -3,7 +3,7 @@
 
 > **Institution:** Southern Luzon State University — Lucban Campus
 > **System:** iSched — Constraint-Based Scheduling with Backtracking Algorithm
-> **Stack:** Next.js 15 · TypeScript · PostgreSQL · Prisma · Clerk · Tailwind CSS · Shadcn/UI · FullCalendar
+> **Stack:** Next.js 15 · TypeScript · PostgreSQL · Prisma · Supabase Auth · Tailwind CSS · Shadcn/UI · FullCalendar
 > **Methodology:** Agile Scrum · ISO 25010:2023 Evaluation
 
 ---
@@ -172,7 +172,7 @@ const config: Config = {
 ┌──────────────────────────▼──────────────────────────────────────┐
 │                     APPLICATION LAYER                           │
 │  Next.js API Routes (Route Handlers)                            │
-│  Clerk Middleware (Auth + RBAC)                                 │
+│  Supabase Auth Middleware (Auth + RBAC)                        │
 │  Server Actions (Form submissions, mutations)                   │
 │  Zod Validation Layer                                           │
 └──────────────────────────┬──────────────────────────────────────┘
@@ -195,7 +195,7 @@ const config: Config = {
 
 ┌─────────────────────────────────────────────────────────────────┐
 │                    EXTERNAL SERVICES                            │
-│  Clerk (Auth, User Management, RBAC)                            │
+│  Supabase (Auth, User Management, RBAC, PostgreSQL)            │
 │  Vercel (Hosting, Edge Network) [recommended]                  │
 │  Uploadthing (File uploads — optional)                          │
 └─────────────────────────────────────────────────────────────────┘
@@ -205,7 +205,7 @@ const config: Config = {
 
 ```
 app/
-├── (auth)/                    # Clerk sign-in/sign-up
+├── (auth)/                    # Supabase sign-in/sign-up
 │   ├── sign-in/[[...sign-in]]/
 │   └── sign-up/[[...sign-up]]/
 ├── (dashboard)/               # Protected layout group
@@ -219,7 +219,7 @@ app/
 ├── room/[roomId]/             # Public QR Code room view
 │   └── page.tsx               # Permanent public URL
 ├── api/
-│   ├── webhooks/clerk/        # Clerk webhook sync
+│   ├── webhooks/supabase/     # Supabase webhook sync
 │   ├── schedules/             # Schedule CRUD
 │   ├── generate/              # Algorithm endpoint
 │   ├── rooms/                 # Room management
@@ -245,7 +245,7 @@ C:\iSched\
 │   └── shared/                # Badges, Status, Loaders
 ├── lib/
 │   ├── db.ts                  # Prisma client singleton
-│   ├── auth.ts                # Clerk helper utilities
+│   ├── auth.ts                # Supabase helper utilities
 │   ├── validations/           # Zod schemas
 │   ├── services/              # Business logic services
 │   │   ├── scheduler.ts       # Backtracking engine
@@ -265,7 +265,7 @@ C:\iSched\
 │   └── icons/                 # Static SVG icons
 ├── styles/
 │   └── globals.css            # Global CSS + design tokens
-├── middleware.ts              # Clerk auth middleware
+├── middleware.ts              # Supabase auth middleware
 ├── next.config.ts
 ├── tailwind.config.ts
 ├── package.json
@@ -339,7 +339,7 @@ enum SemesterType {
 
 model User {
   id         String   @id @default(cuid())
-  clerkId    String   @unique
+  supabaseId    String   @unique
   email      String   @unique
   firstName  String
   lastName   String
@@ -353,7 +353,7 @@ model User {
   departmentChair  DepartmentChair?
   programHead      ProgramHead?
 
-  @@index([clerkId])
+  @@index([supabaseId])
   @@index([role])
 }
 
@@ -664,28 +664,21 @@ model Notification {
 
 ## 5. Authentication & RBAC
 
-### 5.1 Clerk Configuration
+### 5.1 Supabase Auth Configuration
 
 ```typescript
 // middleware.ts
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
-import { NextResponse } from 'next/server'
+import { updateSession } from '@/lib/supabase/middleware'
+import { type NextRequest } from 'next/server'
 
-const isPublicRoute = createRouteMatcher([
-  '/sign-in(.*)',
-  '/sign-up(.*)',
-  '/room/(.*)',       // QR code room view is public
-  '/api/webhooks(.*)',
-])
-
-export default clerkMiddleware(async (auth, req) => {
-  if (!isPublicRoute(req)) {
-    await auth.protect()
-  }
-})
+export async function middleware(request: NextRequest) {
+  return await updateSession(request)
+}
 
 export const config = {
-  matcher: ['/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)', '/(api|trpc)(.*)'],
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|images/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+  ],
 }
 ```
 
@@ -693,16 +686,29 @@ export const config = {
 
 ```typescript
 // lib/auth.ts
-import { auth } from '@clerk/nextjs/server'
+import { createClient } from '@/lib/supabase/server'
 import { db } from '@/lib/db'
-import { UserRole } from '@prisma/client'
 
 export async function getCurrentUser() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) return null
+
+  return db.user.findUnique({
+    where: { supabaseId: user.id },
+    include: {
+      faculty: { include: { department: true } },
+      departmentChair: { include: { department: true } },
+      programHead: { include: { program: true } },
+    },
+  })
+}
   const { userId } = await auth()
   if (!userId) return null
 
   return db.user.findUnique({
-    where: { clerkId: userId },
+    where: { supabaseId: user.id },
     include: {
       faculty: { include: { department: true } },
       departmentChair: { include: { department: true } },
@@ -737,41 +743,32 @@ export const ROLE_PERMISSIONS = {
 } as const
 ```
 
-### 5.3 Clerk Webhook Sync
+### 5.3 Supabase User Synchronization
+
+Supabase Auth automatically handles user creation and authentication. User profile data is synchronized to the database on first login via the `ensureDbUser` function in `lib/auth.ts`. No webhooks are required for basic user management.
 
 ```typescript
-// app/api/webhooks/clerk/route.ts
-import { Webhook } from 'svix'
-import { UserJSON, WebhookEvent } from '@clerk/nextjs/server'
-import { db } from '@/lib/db'
+// lib/auth.ts - ensureDbUser function
+export async function ensureDbUser(supabaseUser: SupabaseUser) {
+  const existing = await db.user.findUnique({
+    where: { supabaseId: supabaseUser.id },
+    include: { /* relations */ },
+  })
 
-export async function POST(req: Request) {
-  const body = await req.text()
-  const wh = new Webhook(process.env.CLERK_WEBHOOK_SECRET!)
-  let event: WebhookEvent
+  if (existing) return existing
 
-  try {
-    event = wh.verify(body, {
-      'svix-id':        req.headers.get('svix-id')!,
-      'svix-timestamp': req.headers.get('svix-timestamp')!,
-      'svix-signature': req.headers.get('svix-signature')!,
-    }) as WebhookEvent
-  } catch {
-    return new Response('Invalid signature', { status: 400 })
-  }
-
-  const { type, data } = event
-
-  if (type === 'user.created' || type === 'user.updated') {
-    const user = data as UserJSON
-    await db.user.upsert({
-      where: { clerkId: user.id },
-      create: {
-        clerkId:   user.id,
-        email:     user.email_addresses[0].email_address,
-        firstName: user.first_name ?? '',
-        lastName:  user.last_name ?? '',
-        role:      (user.public_metadata?.role as string ?? 'STUDENT') as any,
+  return db.user.create({
+    data: {
+      supabaseId: supabaseUser.id,
+      email: supabaseUser.email ?? '',
+      firstName: supabaseUser.user_metadata?.first_name ?? '',
+      lastName: supabaseUser.user_metadata?.last_name ?? '',
+      role: 'STUDENT',
+    },
+    include: { /* relations */ },
+  })
+}
+```
       },
       update: {
         email:     user.email_addresses[0].email_address,
@@ -780,16 +777,6 @@ export async function POST(req: Request) {
         role:      (user.public_metadata?.role as string ?? 'STUDENT') as any,
       },
     })
-  }
-
-  if (type === 'user.deleted') {
-    await db.user.update({
-      where: { clerkId: data.id! },
-      data: { isActive: false },
-    })
-  }
-
-  return new Response(null, { status: 200 })
 }
 ```
 
@@ -819,11 +806,10 @@ export async function POST(req: Request) {
 ```env
 # .env.local
 DATABASE_URL="postgresql://user:password@localhost:5432/ischeddb"
-DIRECT_URL="postgresql://user:password@localhost:5432/ischeddb"
 
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=""
-CLERK_SECRET_KEY=""
-CLERK_WEBHOOK_SECRET=""
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=""
+NEXT_PUBLIC_SUPABASE_ANON_KEY=""
 
 NEXT_PUBLIC_APP_URL="http://localhost:3000"
 ```
@@ -877,12 +863,12 @@ main().catch(console.error).finally(() => db.$disconnect())
 ### Phase 2: Access Control & Centralized Dashboards
 
 **Duration:** Sprint 3–4 (2 weeks)
-**Goal:** Role-specific dashboards with Clerk integration, sidebar navigation, and shared layout components.
+**Goal:** Role-specific dashboards with Supabase Auth integration, sidebar navigation, and shared layout components.
 
 #### Deliverables
 
-- [ ] Authentication flow (Clerk sign-in/sign-up pages, SLSU-branded)
-- [ ] Clerk Webhook → DB sync
+- [ ] Authentication flow (Supabase sign-in/sign-up pages, SLSU-branded)
+- [ ] Supabase user sync on login
 - [ ] Role-aware dashboard layouts
 - [ ] Sidebar navigation (role-filtered)
 - [ ] Top-bar with notifications bell + user profile dropdown
@@ -1546,7 +1532,7 @@ export async function generateAllRoomQRCodes(): Promise<void> {
 - [ ] ISO 25010:2023 evaluation instruments (surveys, test cases)
 - [ ] User Acceptance Testing (UAT) with SLSU stakeholders
 - [ ] Performance testing (Lighthouse, load testing)
-- [ ] Security audit (OWASP checklist, Clerk hardening)
+- [ ] Security audit (OWASP checklist, Supabase security)
 - [ ] Production deployment (Vercel + managed PostgreSQL)
 - [ ] Documentation (user manual, API docs)
 - [ ] Final bug fixes from evaluation feedback
@@ -1778,7 +1764,7 @@ export const GenerateScheduleSchema = z.object({
 | **Compatibility** | Coexistence, Interoperability | Cross-browser testing (Chrome, Firefox, Edge, Safari) |
 | **Interaction Capability** | Appropriateness, Learnability, Operability, Error protection, Accessibility, User engagement | SUS survey, task completion tests |
 | **Reliability** | Faultlessness, Availability, Fault tolerance, Recoverability | Uptime monitoring, chaos testing |
-| **Security** | Confidentiality, Integrity, Non-repudiation, Accountability, Authenticity, Resistance | OWASP checklist, Clerk audit logs |
+| **Security** | Confidentiality, Integrity, Non-repudiation, Accountability, Authenticity, Resistance | OWASP checklist, Supabase audit logs |
 | **Maintainability** | Modularity, Reusability, Analysability, Modifiability, Testability | Code coverage, cyclomatic complexity |
 | **Flexibility** | Adaptability, Scalability, Installability, Replaceability | Load testing, config-change testing |
 
@@ -1980,7 +1966,8 @@ Add these indexes beyond what's in the schema:
     "react":                       "^19.0.0",
     "typescript":                  "^5.6.0",
     "@prisma/client":              "^5.22.0",
-    "@clerk/nextjs":               "^6.0.0",
+    "@supabase/supabase-js":      "^2.99.2",
+    "@supabase/ssr":              "^0.9.0",
     "tailwindcss":                 "^3.4.0",
     "@shadcn/ui":                  "latest",
     "lucide-react":                "^0.460.0",

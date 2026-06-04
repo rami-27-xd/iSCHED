@@ -8,7 +8,7 @@ type ConflictType =
   | 'ROOM_OVERLAP'
   | 'SECTION_OVERLAP'
   | 'LOAD_EXCEEDED'
-  | 'ROOM_CAPACITY_EXCEEDED'
+  // Room capacity check removed — capacity field removed from Room model
 
 type ConflictSeverity = 'ERROR' | 'WARNING'
 
@@ -23,20 +23,20 @@ export interface ScheduleEntry {
   id: string
   subjectId: string
   subjectCode: string
-  subjectType: 'LECTURE' | 'LABORATORY' | 'HYBRID'
+  subjectType: 'LECTURE' | 'LABORATORY'
   subjectUnits: number
   facultyId: string
   facultyName: string
   facultyMaxUnits: number
   roomId: string
   roomCode: string
-  roomCapacity: number
   sectionId: string
   sectionName: string
   sectionCapacity: number
   day: DayOfWeek
   startTime: string
   endTime: string
+  set?: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,8 @@ function detectSectionOverlaps(entries: ScheduleEntry[]): Conflict[] {
     if (group.length < 2) continue
     const overlaps = findTimeOverlaps(group)
     for (const [a, b] of overlaps) {
+      // Lab entries with different sets are independent student groups — not a conflict
+      if (a.set && b.set && a.set !== b.set) continue
       conflicts.push({
         type: 'SECTION_OVERLAP',
         severity: 'ERROR',
@@ -189,26 +191,6 @@ function detectLoadExceeded(entries: ScheduleEntry[], maxWeeklyUnits = 21): Conf
   return conflicts
 }
 
-function detectRoomCapacityExceeded(entries: ScheduleEntry[]): Conflict[] {
-  const conflicts: Conflict[] = []
-
-  for (const entry of entries) {
-    if (entry.sectionCapacity > entry.roomCapacity) {
-      conflicts.push({
-        type: 'ROOM_CAPACITY_EXCEEDED',
-        severity: 'WARNING',
-        description:
-          `Section "${entry.sectionName}" (${entry.sectionCapacity} students) ` +
-          `exceeds room "${entry.roomCode}" capacity (${entry.roomCapacity}) ` +
-          `for "${entry.subjectCode}" on ${entry.day} ${entry.startTime}-${entry.endTime}`,
-        entryIds: [entry.id],
-      })
-    }
-  }
-
-  return conflicts
-}
-
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
@@ -224,6 +206,5 @@ export function detectConflicts(
     ...detectRoomOverlaps(entries),
     ...detectSectionOverlaps(entries),
     ...detectLoadExceeded(entries, maxWeeklyUnits),
-    ...detectRoomCapacityExceeded(entries),
   ]
 }

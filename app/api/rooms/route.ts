@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server"
-import { auth } from "@clerk/nextjs/server"
+import { getAuthenticatedUser, getCurrentUser } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 
 export async function GET(req: Request) {
   try {
-    const { userId } = await auth()
-    if (!userId) {
+    const user = await getAuthenticatedUser()
+    if (!user) {
       return NextResponse.json(apiError("Unauthorized"), { status: 401 })
     }
 
@@ -35,13 +35,19 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const { userId } = await auth()
-    if (!userId) {
+    const user = await getAuthenticatedUser()
+    if (!user) {
       return NextResponse.json(apiError("Unauthorized"), { status: 401 })
     }
 
+    // Only SUPER_ADMIN and ADMIN can create rooms
+    const dbUser = await getCurrentUser()
+    if (!dbUser || !["SUPER_ADMIN", "ADMIN"].includes(dbUser.role)) {
+      return NextResponse.json(apiError("Forbidden — insufficient permissions"), { status: 403 })
+    }
+
     const body = await req.json()
-    const { name, code, buildingId, type, capacity, equipment } = body
+    const { name, code, buildingId, type, equipment } = body
 
     const room = await db.room.create({
       data: {
@@ -49,7 +55,6 @@ export async function POST(req: Request) {
         code,
         buildingId,
         type,
-        capacity: capacity ?? 40,
         equipment: equipment ?? [],
       },
       include: { building: true },

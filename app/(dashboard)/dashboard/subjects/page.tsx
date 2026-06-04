@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useMemo } from "react"
 import { PageHeader } from "@/components/shared/page-header"
 import { EmptyState } from "@/components/shared/empty-state"
 import { Button } from "@/components/ui/button"
@@ -8,182 +8,673 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "@/components/ui/table"
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import {
-  BookOpen, Plus, Search, Clock, MoreHorizontal, Pencil, Trash2,
+  BookOpen, Plus, Search, ChevronDown, ChevronRight, GraduationCap,
+  Users2, Layers, Pencil, Trash2, Loader2, Building2, Send,
 } from "lucide-react"
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { toast } from "sonner"
+import { useColleges, useCreateSubject, useUpdateSubject, useDeleteSubject, useCreateSection, useUpdateSection, useDeleteSection } from "@/hooks/use-data"
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { RoleGuard } from "@/components/shared/role-guard"
+import { getCurriculumCodes, hasCurriculumMap } from "@/lib/curriculum-map"
 
 const TYPE_COLORS: Record<string, string> = {
-  LECTURE: "bg-primary/10 text-primary",
-  LABORATORY: "bg-accent/10 text-accent-foreground",
-  HYBRID: "bg-info/10 text-info",
+  LECTURE: "bg-blue-100 text-blue-800",
+  LABORATORY: "bg-purple-100 text-purple-800",
 }
 
-const subjectsData = [
-  { id: "1", code: "IT 101", title: "Introduction to Computing", units: 3, hoursPerWeek: 3, type: "LECTURE", department: "CCS", requiredRoomType: "LECTURE_ROOM" },
-  { id: "2", code: "IT 102", title: "Computer Programming 1", units: 3, hoursPerWeek: 3, type: "LABORATORY", department: "CCS", requiredRoomType: "COMPUTER_LAB" },
-  { id: "3", code: "IT 201", title: "Data Structures & Algorithms", units: 3, hoursPerWeek: 3, type: "LECTURE", department: "CCS", requiredRoomType: "LECTURE_ROOM" },
-  { id: "4", code: "IT 202", title: "Object-Oriented Programming", units: 3, hoursPerWeek: 3, type: "LABORATORY", department: "CCS", requiredRoomType: "COMPUTER_LAB" },
-  { id: "5", code: "IT 301", title: "Web Development", units: 3, hoursPerWeek: 3, type: "HYBRID", department: "CCS", requiredRoomType: "LECTURE_LAB" },
-  { id: "6", code: "GE 101", title: "Understanding the Self", units: 3, hoursPerWeek: 3, type: "LECTURE", department: "CAS", requiredRoomType: "LECTURE_ROOM" },
-  { id: "7", code: "ED 101", title: "Foundations of Education", units: 3, hoursPerWeek: 3, type: "LECTURE", department: "COED", requiredRoomType: "LECTURE_ROOM" },
-]
+const INITIAL_SUBJECT = { code: "", title: "", units: "3", type: "", departmentId: "", yearLevelId: "", semester: "FIRST", year: "1" }
+const INITIAL_SECTION = { name: "", yearLevelId: "", capacity: "40" }
 
-export default function SubjectsPage() {
+function SubjectTable({ subjects, onEdit, onDelete, displayYear, displaySemester }: {
+  subjects: any[]; onEdit: (s: any) => void; onDelete: (id: string) => void;
+  displayYear?: number; displaySemester?: string;
+}) {
+  if (subjects.length === 0) return null
+  const yearLabel = (yr: number) => `${yr}${yr === 1 ? "st" : yr === 2 ? "nd" : yr === 3 ? "rd" : "th"}`
+  const semLabel = (sem: string) => sem === "FIRST" ? "1st" : sem === "SECOND" ? "2nd" : "—"
+  return (
+    <div className="rounded-lg border overflow-x-auto">
+      <table className="w-full text-sm min-w-[640px]">
+        <thead>
+          <tr className="bg-muted/50">
+            <th className="px-3 py-1.5 text-left text-xs font-medium text-muted-foreground">Code</th>
+            <th className="px-3 py-1.5 text-left text-xs font-medium text-muted-foreground">Title</th>
+            <th className="px-3 py-1.5 text-left text-xs font-medium text-muted-foreground">Type</th>
+            <th className="px-3 py-1.5 text-left text-xs font-medium text-muted-foreground">Units</th>
+            <th className="px-3 py-1.5 w-16" />
+          </tr>
+        </thead>
+        <tbody>
+          {subjects.map((s: any) => (
+            <tr key={s.id} className="border-t hover:bg-muted/20">
+              <td className="px-3 py-1.5 font-mono text-xs font-medium">
+                {s.code}
+                {(s.code.startsWith("GEC") || s.code.startsWith("PATHFIT") || s.code.startsWith("PATHFit")) && (
+                  <span className="ml-1 inline-flex rounded-full bg-emerald-100 text-emerald-700 px-1.5 py-0 text-[9px] font-medium">GEC</span>
+                )}
+              </td>
+              <td className="px-3 py-1.5 text-xs">{s.title}</td>
+              <td className="px-3 py-1.5">
+                <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${TYPE_COLORS[s.type] ?? ""}`}>
+                  {s.type}
+                </span>
+              </td>
+              <td className="px-3 py-1.5 text-xs">{s.units}</td>
+              <td className="px-3 py-1.5">
+                <div className="flex items-center gap-1">
+                  <button onClick={() => onEdit(s)} className="p-1 rounded hover:bg-muted">
+                    <Pencil className="h-3 w-3 text-muted-foreground" />
+                  </button>
+                  <button onClick={() => onDelete(s.id)} className="p-1 rounded hover:bg-muted">
+                    <Trash2 className="h-3 w-3 text-destructive" />
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+export default function CoursesPage() {
   const [search, setSearch] = useState("")
-  const [typeFilter, setTypeFilter] = useState("all")
-  const [addOpen, setAddOpen] = useState(false)
+  const [semesterFilter, setSemesterFilter] = useState<string>("FIRST")
+  const [expandedColleges, setExpandedColleges] = useState<Set<string>>(new Set())
+  const [expandedPrograms, setExpandedPrograms] = useState<Set<string>>(new Set())
 
-  const filtered = subjectsData.filter((s) => {
-    const matchSearch =
-      s.code.toLowerCase().includes(search.toLowerCase()) ||
-      s.title.toLowerCase().includes(search.toLowerCase())
-    const matchType = typeFilter === "all" || s.type === typeFilter
-    return matchSearch && matchType
+  // Subject dialog
+  const [subjectOpen, setSubjectOpen] = useState(false)
+  const [subjectForm, setSubjectForm] = useState(INITIAL_SUBJECT)
+  const [editSubjectTarget, setEditSubjectTarget] = useState<any>(null)
+
+  // Section dialog
+  const [sectionOpen, setSectionOpen] = useState(false)
+  const [sectionForm, setSectionForm] = useState(INITIAL_SECTION)
+  const [editSectionTarget, setEditSectionTarget] = useState<any>(null)
+
+  // Faculty request dialog
+  const [requestOpen, setRequestOpen] = useState(false)
+  const [requestReason, setRequestReason] = useState("")
+  const [requestSubjectId, setRequestSubjectId] = useState("")
+
+  // Current user info
+  const { data: currentUser } = useQuery({
+    queryKey: ["current-user-role"],
+    queryFn: async () => {
+      const res = await fetch("/api/users/me")
+      const json = await res.json()
+      if (!res.ok) return { role: "FACULTY" }
+      return json.data ?? { role: "FACULTY" }
+    },
+  })
+  const userRole = (currentUser?.role ?? "FACULTY") as string
+  const isSuperAdmin = userRole === "SUPER_ADMIN"
+  const isAdmin = userRole === "ADMIN"
+
+  const queryClient = useQueryClient()
+  const { data: colleges = [], isLoading } = useColleges(semesterFilter)
+  const createSubject = useCreateSubject()
+  const updateSubject = useUpdateSubject()
+  const deleteSubject = useDeleteSubject()
+  const createSection = useCreateSection()
+  const updateSection = useUpdateSection()
+  const deleteSection = useDeleteSection()
+
+  // Faculty request mutation
+  const sendFacultyRequest = useMutation({
+    mutationFn: async (data: { reason: string; subjectId?: string }) => {
+      const res = await fetch("/api/faculty/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? "Failed to send request")
+      return json.data
+    },
+    onSuccess: () => {
+      toast.success("Faculty request sent to Department Chair")
+      setRequestOpen(false)
+      setRequestReason("")
+      setRequestSubjectId("")
+    },
+    onError: (err: Error) => toast.error(err.message),
   })
 
+  function toggleCollege(id: string) {
+    setExpandedColleges(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function toggleProgram(id: string) {
+    setExpandedPrograms(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function openAddSubject(departmentId: string, yearLevelId?: string) {
+    setEditSubjectTarget(null)
+    setSubjectForm({ ...INITIAL_SUBJECT, departmentId, yearLevelId: yearLevelId ?? "", semester: semesterFilter || "FIRST" })
+    setSubjectOpen(true)
+  }
+
+  function openEditSubject(s: any) {
+    setEditSubjectTarget(s)
+    setSubjectForm({
+      code: s.code, title: s.title, units: String(s.units),
+      type: s.type, departmentId: s.departmentId,
+      yearLevelId: s.yearLevelId ?? "",
+      semester: s.semester ?? "FIRST",
+      year: String(s.year ?? 1),
+    })
+    setSubjectOpen(true)
+  }
+
+  function openAddSection(yearLevelId: string, programAbbr: string, level: number) {
+    setEditSectionTarget(null)
+    setSectionForm({ name: `${programAbbr} ${level}-`, yearLevelId, capacity: "40" })
+    setSectionOpen(true)
+  }
+
+  function openEditSection(sec: any) {
+    setEditSectionTarget(sec)
+    setSectionForm({ name: sec.name, yearLevelId: sec.yearLevelId, capacity: String(sec.capacity) })
+    setSectionOpen(true)
+  }
+
+  async function handleSubjectSubmit() {
+    const { code, title, type, departmentId, yearLevelId, year, semester } = subjectForm
+    if (!code || !title || !type || !departmentId) return toast.error("Fill in all required fields")
+
+    // ── Auto-align yearLevelId to match the selected year ───────────────────
+    // If yearLevelId doesn't match the chosen year, find the correct one
+    let resolvedYearLevelId = yearLevelId
+    if (year) {
+      const matched = (colleges as any[])
+        .flatMap((c: any) => c.departments ?? [])
+        .filter((d: any) => d.id === departmentId)
+        .flatMap((d: any) => d.programs ?? [])
+        .flatMap((p: any) => p.yearLevels ?? [])
+        .find((yl: any) => String(yl.level) === String(year))
+      if (matched) resolvedYearLevelId = matched.id
+    }
+
+    // ── Duplicate subject code check ────────────────────────────────────────
+    // A subject code must not appear more than once in the same department
+    const allDeptSubjects: any[] = (colleges as any[])
+      .flatMap((c: any) => c.departments ?? [])
+      .filter((d: any) => d.id === departmentId)
+      .flatMap((d: any) => d.subjects ?? [])
+
+    const existingWithSameCode = allDeptSubjects.filter(
+      (s: any) => s.code.toLowerCase() === code.toLowerCase() &&
+        (!editSubjectTarget || s.id !== editSubjectTarget.id)
+    )
+    if (existingWithSameCode.length > 0) {
+      const existing = existingWithSameCode[0]
+      return toast.error(
+        `"${code}" already exists in this department (${existing.semester === 'FIRST' ? '1st' : '2nd'} Semester, Year ${existing.year}). A subject code can only appear once per department.`
+      )
+    }
+
+    try {
+      if (editSubjectTarget) {
+        await updateSubject.mutateAsync({
+          id: editSubjectTarget.id,
+          code: subjectForm.code,
+          title: subjectForm.title,
+          units: subjectForm.units,
+          hoursPerWeek: subjectForm.units,
+          type: subjectForm.type,
+          departmentId: subjectForm.departmentId,
+          yearLevelId: resolvedYearLevelId || null,
+          semester: subjectForm.semester,
+          year: subjectForm.year,
+        })
+      } else {
+        const payload = {
+          ...subjectForm,
+          hoursPerWeek: subjectForm.units,
+          yearLevelId: resolvedYearLevelId || null,
+        }
+        await createSubject.mutateAsync(payload)
+        if (subjectForm.semester && subjectForm.semester !== semesterFilter) {
+          setSemesterFilter(subjectForm.semester)
+        }
+      }
+      setSubjectOpen(false)
+      setEditSubjectTarget(null)
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+  }
+
+  async function handleDeleteSubject(id: string) {
+    if (!confirm("Delete this subject?")) return
+    try { await deleteSubject.mutateAsync(id) } catch (err: any) { toast.error(err.message) }
+  }
+
+  async function handleSectionSubmit() {
+    const { name, yearLevelId } = sectionForm
+    if (!name || !yearLevelId) return toast.error("Fill in all required fields")
+    try {
+      if (editSectionTarget) {
+        await updateSection.mutateAsync({ id: editSectionTarget.id, ...sectionForm, capacity: Number(sectionForm.capacity) })
+      } else {
+        await createSection.mutateAsync({ ...sectionForm, capacity: Number(sectionForm.capacity) })
+      }
+      setSectionOpen(false)
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+  }
+
+  async function handleDeleteSection(id: string) {
+    if (!confirm("Delete this section?")) return
+    try { await deleteSection.mutateAsync(id) } catch (err: any) { toast.error(err.message) }
+  }
+
+  // Filter colleges by search
+  const filtered = search
+    ? colleges.filter((c: any) => {
+        const term = search.toLowerCase()
+        if (c.name.toLowerCase().includes(term) || c.abbreviation.toLowerCase().includes(term)) return true
+        return c.departments?.some((d: any) =>
+          d.programs?.some((p: any) =>
+            p.name.toLowerCase().includes(term) || p.abbreviation.toLowerCase().includes(term)
+          ) ||
+          d.subjects?.some((s: any) =>
+            s.code.toLowerCase().includes(term) || s.title.toLowerCase().includes(term)
+          )
+        )
+      })
+    : colleges
+
   return (
+    <RoleGuard allowedRoles={["SUPER_ADMIN", "ADMIN"]}>
     <div className="space-y-6">
       <PageHeader
-        title="Subjects"
-        description="Manage course offerings and subject configurations"
+        title="Departments"
+        description={isSuperAdmin
+          ? "Manage GEC and PATHFIT subjects across all programs"
+          : "Manage subjects, sections, and academic structure for your department"
+        }
         action={
-          <Dialog open={addOpen} onOpenChange={setAddOpen}>
-            <DialogTrigger render={<Button />}>
-              <Plus className="mr-2 h-4 w-4" />Add Subject
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
-              <DialogHeader><DialogTitle>Add Subject</DialogTitle></DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="grid gap-2">
-                    <Label>Subject Code</Label>
-                    <Input placeholder="e.g. IT 101" />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label>Units</Label>
-                    <Input type="number" defaultValue={3} />
-                  </div>
-                </div>
-                <div className="grid gap-2">
-                  <Label>Title</Label>
-                  <Input placeholder="e.g. Introduction to Computing" />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="grid gap-2">
-                    <Label>Type</Label>
-                    <Select>
-                      <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="LECTURE">Lecture</SelectItem>
-                        <SelectItem value="LABORATORY">Laboratory</SelectItem>
-                        <SelectItem value="HYBRID">Hybrid</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-2">
-                    <Label>Hours/Week</Label>
-                    <Input type="number" defaultValue={3} />
-                  </div>
-                </div>
-                <div className="grid gap-2">
-                  <Label>Department</Label>
-                  <Select>
-                    <SelectTrigger><SelectValue placeholder="Select department" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="CCS">CCS</SelectItem>
-                      <SelectItem value="COED">COED</SelectItem>
-                      <SelectItem value="CAS">CAS</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
-                <Button onClick={() => setAddOpen(false)}>Save</Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+          isAdmin && (
+            <Button variant="outline" size="sm" onClick={() => setRequestOpen(true)}>
+              <Send className="mr-2 h-4 w-4" />
+              Request Faculty
+            </Button>
+          )
         }
       />
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="relative flex-1 max-w-sm">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative max-w-sm flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input placeholder="Search subjects..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
+          <Input
+            placeholder="Search colleges, programs, subjects..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-9"
+          />
         </div>
-        <Select value={typeFilter} onValueChange={(v) => v && setTypeFilter(v)}>
-          <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Types</SelectItem>
-            <SelectItem value="LECTURE">Lecture</SelectItem>
-            <SelectItem value="LABORATORY">Laboratory</SelectItem>
-            <SelectItem value="HYBRID">Hybrid</SelectItem>
-          </SelectContent>
-        </Select>
+
+        {/* Semester Filter */}
+        <div className="flex items-center rounded-lg border bg-background p-0.5">
+          <button
+            onClick={() => setSemesterFilter("FIRST")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              semesterFilter === "FIRST"
+                ? "bg-[#1B4332] text-white"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            1st Semester
+          </button>
+          <button
+            onClick={() => setSemesterFilter("SECOND")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              semesterFilter === "SECOND"
+                ? "bg-[#1B4332] text-white"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            2nd Semester
+          </button>
+        </div>
       </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState icon={BookOpen} title="No subjects found" description="No subjects match your search." />
+      {isLoading ? (
+        <div className="flex h-24 items-center justify-center text-muted-foreground text-sm">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />Loading...
+        </div>
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={GraduationCap} title="No colleges found" description="No data matches your search." />
       ) : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Code</TableHead>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Units</TableHead>
-                  <TableHead>Hours/Week</TableHead>
-                  <TableHead>Department</TableHead>
-                  <TableHead className="w-10"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((s) => (
-                  <TableRow key={s.id}>
-                    <TableCell className="font-mono font-medium">{s.code}</TableCell>
-                    <TableCell>{s.title}</TableCell>
-                    <TableCell>
-                      <Badge variant="secondary" className={TYPE_COLORS[s.type] ?? ""}>{s.type}</Badge>
-                    </TableCell>
-                    <TableCell>{s.units}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5">
-                        <Clock className="h-3.5 w-3.5 text-muted-foreground" />{s.hoursPerWeek}h
+        <div className="space-y-3">
+          {filtered.map((college: any) => {
+            const dept = college.departments?.[0]
+            const isExpanded = expandedColleges.has(college.id)
+            const programCount = dept?.programs?.length ?? 0
+            const subjectCount = dept?.subjects?.length ?? 0
+
+            return (
+              <Card key={college.id} className="overflow-hidden">
+                {/* College Header */}
+                <button
+                  onClick={() => toggleCollege(college.id)}
+                  className="flex w-full items-center gap-3 p-4 text-left hover:bg-muted/50 transition-colors"
+                >
+                  {isExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />}
+                  <Building2 className="h-5 w-5 text-[#1B4332] shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-sm">{college.name}</p>
+                    <p className="text-xs text-muted-foreground">{programCount} programs &middot; {subjectCount} subjects ({semesterFilter === "FIRST" ? "1st Sem" : "2nd Sem"})</p>
+                  </div>
+                  <Badge variant="outline" className="text-xs font-mono">{college.abbreviation}</Badge>
+                </button>
+
+                {/* Expanded Content */}
+                {isExpanded && dept && (
+                  <CardContent className="border-t pt-4 space-y-4">
+                    {/* Programs */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Programs / Courses</h4>
                       </div>
-                    </TableCell>
-                    <TableCell><Badge variant="outline">{s.department}</Badge></TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8" />}>
-                          <MoreHorizontal className="h-4 w-4" />
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem><Pencil className="mr-2 h-4 w-4" />Edit</DropdownMenuItem>
-                          <DropdownMenuItem className="text-destructive"><Trash2 className="mr-2 h-4 w-4" />Delete</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+                      {(dept.programs ?? []).length === 0 ? (
+                        <p className="text-sm text-muted-foreground italic">No programs</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {dept.programs.map((prog: any) => {
+                            const progExpanded = expandedPrograms.has(prog.id)
+                            const allDeptSubjects: any[] = dept.subjects ?? []
+                            const hasMap = hasCurriculumMap(prog.abbreviation)
+                            return (
+                              <div key={prog.id} className="rounded-lg border">
+                                <button
+                                  onClick={() => toggleProgram(prog.id)}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/30 transition-colors"
+                                >
+                                  {progExpanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+                                  <GraduationCap className="h-4 w-4 text-[#D4AF37]" />
+                                  <span className="text-sm font-medium flex-1">{prog.name}</span>
+                                  <Badge variant="secondary" className="text-xs font-mono">{prog.abbreviation}</Badge>
+                                </button>
+                                {progExpanded && (
+                                  <div className="border-t px-3 py-3 bg-muted/10 space-y-4">
+                                    {/* Year Levels with Sections AND Subjects */}
+                                    <div className="space-y-4">
+                                      {(prog.yearLevels ?? []).map((yl: any) => {
+                                        // Use curriculum map for precise subject placement per program/year/semester
+                                        const ylSubjects = hasMap
+                                          ? (() => {
+                                              const codes = getCurriculumCodes(prog.abbreviation, yl.level, semesterFilter as "FIRST" | "SECOND")
+                                              const codeSetLower = new Set(codes.map(c => c.toLowerCase()))
+                                              // Also filter by semester field so subjects don't appear in the wrong semester tab
+                                              return allDeptSubjects.filter((s: any) =>
+                                                codeSetLower.has((s.code ?? "").toLowerCase()) &&
+                                                s.semester === semesterFilter
+                                              )
+                                            })()
+                                          : allDeptSubjects.filter((s: any) =>
+                                              (s.yearLevelId === yl.id || (!s.yearLevelId && s.year === yl.level)) &&
+                                              s.semester === semesterFilter
+                                            )
+                                        return (
+                                          <div key={yl.id} className="space-y-2">
+                                            <div className="flex items-center justify-between">
+                                              <div className="flex items-center gap-2">
+                                                <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                                                <span className="text-xs font-semibold">Year {yl.level}</span>
+                                                <Badge variant="outline" className="text-[10px]">
+                                                  {ylSubjects.length} subjects
+                                                </Badge>
+                                              </div>
+                                              <div className="flex items-center gap-1">
+                                                <Button
+                                                  variant="ghost"
+                                                  size="sm"
+                                                  className="h-6 px-2 text-xs"
+                                                  onClick={() => openAddSection(yl.id, prog.abbreviation, yl.level)}
+                                                >
+                                                  <Plus className="h-3 w-3 mr-1" />Section
+                                                </Button>
+                                                <Button
+                                                  variant="outline"
+                                                  size="sm"
+                                                  className="h-6 px-2 text-xs"
+                                                  onClick={() => openAddSubject(dept.id, yl.id)}
+                                                >
+                                                  <Plus className="h-3 w-3 mr-1" />Subject
+                                                </Button>
+                                              </div>
+                                            </div>
+                                            {/* Sections */}
+                                            <div className="flex flex-wrap gap-1.5 ml-5">
+                                              {(yl.sections ?? []).map((sec: any) => (
+                                                <button
+                                                  key={sec.id}
+                                                  onClick={() => openEditSection(sec)}
+                                                  className="inline-flex items-center gap-1 rounded-md bg-white border px-2 py-0.5 text-xs hover:bg-muted/50 transition-colors"
+                                                >
+                                                  <Users2 className="h-3 w-3 text-muted-foreground" />
+                                                  {sec.name}
+                                                </button>
+                                              ))}
+                                              {(yl.sections ?? []).length === 0 && (
+                                                <span className="text-xs text-muted-foreground italic">No sections</span>
+                                              )}
+                                            </div>
+                                            {/* Subjects for this year level */}
+                                            {ylSubjects.length > 0 && (
+                                              <div className="ml-5">
+                                                <SubjectTable subjects={ylSubjects} onEdit={openEditSubject} onDelete={handleDeleteSubject} displayYear={yl.level} displaySemester={semesterFilter} />
+                                              </div>
+                                            )}
+                                            {ylSubjects.length === 0 && (
+                                              <p className="ml-5 text-xs text-muted-foreground italic">No subjects for {semesterFilter === "FIRST" ? "1st" : "2nd"} semester</p>
+                                            )}
+                                          </div>
+                                        )
+                                      })}
+                                      {(prog.yearLevels ?? []).length === 0 && (
+                                        <p className="text-xs text-muted-foreground italic">No year levels configured</p>
+                                      )}
+                                    </div>
+
+                                    {/* General / Unassigned Subjects (only for programs without curriculum map) */}
+                                    {!hasMap && (() => {
+                                      const yearLevels = (prog.yearLevels ?? []).map((yl: any) => yl.level)
+                                      const unassigned = allDeptSubjects.filter((s: any) => !s.yearLevelId && !yearLevels.includes(s.year))
+                                      if (unassigned.length === 0) return null
+                                      return (
+                                        <div>
+                                          <div className="flex items-center justify-between mb-2">
+                                            <h5 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
+                                              <BookOpen className="h-3 w-3" />
+                                              General / Unassigned Subjects
+                                            </h5>
+                                            <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => openAddSubject(dept.id)}>
+                                              <Plus className="h-3 w-3 mr-1" />Add Subject
+                                            </Button>
+                                          </div>
+                                          <SubjectTable subjects={unassigned} onEdit={openEditSubject} onDelete={handleDeleteSubject} />
+                                        </div>
+                                      )
+                                    })()}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                )}
+              </Card>
+            )
+          })}
+        </div>
       )}
+
+      {/* Subject Dialog */}
+      <Dialog open={subjectOpen} onOpenChange={(open) => {
+        setSubjectOpen(open)
+        if (!open) setEditSubjectTarget(null)
+      }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editSubjectTarget ? "Edit Subject" : "Add Subject"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label>Subject Code</Label>
+                <Input placeholder="e.g. BOT01" value={subjectForm.code} onChange={(e) => setSubjectForm(f => ({ ...f, code: e.target.value }))} />
+              </div>
+              <div className="grid gap-2">
+                <Label>Units</Label>
+                <Input type="number" value={subjectForm.units} onChange={(e) => setSubjectForm(f => ({ ...f, units: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>Title</Label>
+              <Input placeholder="e.g. General Botany" value={subjectForm.title} onChange={(e) => setSubjectForm(f => ({ ...f, title: e.target.value }))} />
+            </div>
+            <div className="grid gap-2">
+              <Label>Type</Label>
+              <Select value={subjectForm.type} onValueChange={(v) => v && setSubjectForm(f => ({ ...f, type: v }))}>
+                <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="LECTURE">Lecture</SelectItem>
+                  <SelectItem value="LABORATORY">Laboratory</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label>Semester</Label>
+                <Select value={subjectForm.semester} onValueChange={(v) => v && setSubjectForm(f => ({ ...f, semester: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="FIRST">1st Semester</SelectItem>
+                    <SelectItem value="SECOND">2nd Semester</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label>Year Level</Label>
+                <Select value={subjectForm.year} onValueChange={(v) => v && setSubjectForm(f => ({ ...f, year: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1st Year</SelectItem>
+                    <SelectItem value="2">2nd Year</SelectItem>
+                    <SelectItem value="3">3rd Year</SelectItem>
+                    <SelectItem value="4">4th Year</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSubjectOpen(false)}>Cancel</Button>
+            <Button onClick={handleSubjectSubmit} disabled={createSubject.isPending || updateSubject.isPending}>
+              {(createSubject.isPending || updateSubject.isPending) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {editSubjectTarget ? "Save" : "Add Subject"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Section Dialog */}
+      <Dialog open={sectionOpen} onOpenChange={setSectionOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{editSectionTarget ? "Edit Section" : "Add Section"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label>Section Name</Label>
+              <Input placeholder="e.g. BSBio 1-A" value={sectionForm.name} onChange={(e) => setSectionForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div className="grid gap-2">
+              <Label>Capacity</Label>
+              <Input type="number" value={sectionForm.capacity} onChange={(e) => setSectionForm(f => ({ ...f, capacity: e.target.value }))} />
+            </div>
+            {editSectionTarget && (
+              <Button variant="destructive" size="sm" onClick={() => { handleDeleteSection(editSectionTarget.id); setSectionOpen(false) }}>
+                <Trash2 className="mr-2 h-4 w-4" />Delete Section
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSectionOpen(false)}>Cancel</Button>
+            <Button onClick={handleSectionSubmit} disabled={createSection.isPending || updateSection.isPending}>
+              {(createSection.isPending || updateSection.isPending) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {editSectionTarget ? "Save" : "Add Section"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Faculty Request Dialog (Program Chair only) */}
+      <Dialog open={requestOpen} onOpenChange={setRequestOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Request Faculty from Department Chair</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <p className="text-sm text-muted-foreground">
+              If you lack faculty to handle a subject, send a request to the Department Chairperson (CAS) for assistance.
+            </p>
+            <div className="grid gap-2">
+              <Label>Subject (optional)</Label>
+              <Input
+                placeholder="e.g. General Botany"
+                value={requestSubjectId}
+                onChange={(e) => setRequestSubjectId(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Reason / Details</Label>
+              <textarea
+                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring min-h-[80px]"
+                placeholder="Explain why additional faculty is needed..."
+                value={requestReason}
+                onChange={(e) => setRequestReason(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRequestOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => sendFacultyRequest.mutate({ reason: requestReason, subjectId: requestSubjectId || undefined })}
+              disabled={!requestReason || sendFacultyRequest.isPending}
+            >
+              {sendFacultyRequest.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Send Request
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
+    </RoleGuard>
   )
 }

@@ -32,7 +32,7 @@ export function PageHeader({ title, description, action, children }: PageHeaderP
       </div>
 
       {actionContent && (
-        <div className="flex shrink-0 items-center gap-2">{actionContent}</div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">{actionContent}</div>
       )}
     </div>
   )

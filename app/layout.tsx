@@ -1,12 +1,12 @@
 import type { Metadata } from "next"
-import { Inter } from "next/font/google"
-import { ClerkProvider } from "@clerk/nextjs"
+import { Poppins } from "next/font/google"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "sonner"
 import { QueryProvider } from "@/components/providers/query-provider"
 import "./globals.css"
 
-const inter = Inter({
+const poppins = Poppins({
+  weight: ["300", "400", "500", "600", "700"],
   variable: "--font-sans",
   subsets: ["latin"],
 })
@@ -24,24 +24,22 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <ClerkProvider>
-      <html lang="en" suppressHydrationWarning>
-        <body className={`${inter.variable} antialiased`}>
-          <QueryProvider>
-            <TooltipProvider>
-              {children}
-              <Toaster
-                position="top-right"
-                richColors
-                closeButton
-                toastOptions={{
-                  className: "font-sans",
-                }}
-              />
-            </TooltipProvider>
-          </QueryProvider>
-        </body>
-      </html>
-    </ClerkProvider>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${poppins.variable} antialiased`}>
+        <QueryProvider>
+          <TooltipProvider>
+            {children}
+            <Toaster
+              position="top-right"
+              richColors
+              closeButton
+              toastOptions={{
+                className: "font-sans",
+              }}
+            />
+          </TooltipProvider>
+        </QueryProvider>
+      </body>
+    </html>
   )
 }

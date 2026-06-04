@@ -10,17 +10,14 @@ datasource db {
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 enum UserRole {
-  SUPER_ADMIN
-  DEPARTMENT_CHAIR
-  PROGRAM_HEAD
-  FACULTY
-  STUDENT
+  SUPER_ADMIN // Department/College Chairpersons — final approval, algorithm execution
+  ADMIN       // Program Chairpersons — data submission, managed within their program
+  FACULTY     // End users — view assigned schedule only
 }
 
 enum SubjectType {
   LECTURE
   LABORATORY
-  HYBRID
 }
 
 enum RoomType {
@@ -28,6 +25,20 @@ enum RoomType {
   LABORATORY
   COMPUTER_LAB
   LECTURE_LAB
+}
+
+// Explicit academic specialization categories for laboratory rooms.
+// A subject with a requiredLabSpecialization can ONLY be assigned to a room
+// whose labSpecialization matches exactly — this is a Hard Constraint.
+enum LabSpecialization {
+  CISCO_NETWORKING
+  MULTIMEDIA_DESIGN
+  SOFTWARE_DEVELOPMENT
+  GENERAL_COMPUTING
+  ELECTRONICS
+  NETWORK_SECURITY
+  DATABASE_ADMINISTRATION
+  WEB_DEVELOPMENT
 }
 
 enum DayOfWeek {
@@ -52,19 +63,32 @@ enum SemesterType {
   SUMMER
 }
 
+// Tracks the sequential submission lifecycle for a department/semester pair.
+// The backtracking algorithm is locked behind SUBMITTED_TO_CHAIR.
+enum DepartmentWorkflowStatus {
+  DRAFT           // Program Chair is still inputting/configuring data
+  SUBMITTED_TO_CHAIR // Program Chair has submitted; Department Chair can now process
+  UNDER_REVIEW    // Department Chair is actively reviewing before running algorithm
+  APPROVED        // Department Chair approved; schedule is official
+  REJECTED        // Returned to Program Chair for revision with a note
+}
+
 // ─── Models ──────────────────────────────────────────────────────────────────
 
 model User {
-  id              String           @id @default(cuid())
-  clerkId         String           @unique
-  email           String           @unique
-  firstName       String
-  lastName        String
-  role            UserRole
-  isActive        Boolean          @default(true)
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  id           String          @id @default(cuid())
+  supabaseId   String          @unique
+  email        String          @unique
+  firstName    String
+  lastName     String
+  role         UserRole        @default(FACULTY)
+  isApproved   Boolean         @default(false)
+  isActive     Boolean         @default(true)
+  departmentId String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
 
+  department      Department?      @relation(fields: [departmentId], references: [id])
   faculty         Faculty?
   departmentChair DepartmentChair?
   programHead     ProgramHead?
@@ -82,12 +106,16 @@ model Department {
   name         String
   abbreviation String
   collegeId    String
-  college      College         @relation(fields: [collegeId], references: [id])
 
-  chair        DepartmentChair?
-  programs     Program[]
-  faculty      Faculty[]
-  subjects     Subject[]
+  college        College                   @relation(fields: [collegeId], references: [id])
+  chair          DepartmentChair?
+  users          User[]
+  programs       Program[]
+  faculty        Faculty[]
+  subjects       Subject[]
+  schedules      Schedule[]
+  buildings      DepartmentBuilding[]
+  workflowStates DepartmentWorkflowState[]
 
   @@unique([abbreviation, collegeId])
 }
@@ -106,10 +134,12 @@ model Program {
   name         String
   abbreviation String
   departmentId String
-  department   Department  @relation(fields: [departmentId], references: [id])
 
+  department   Department  @relation(fields: [departmentId], references: [id])
   head         ProgramHead?
   yearLevels   YearLevel[]
+
+  @@unique([abbreviation, departmentId])
 }
 
 model ProgramHead {
@@ -125,9 +155,10 @@ model YearLevel {
   id        String    @id @default(cuid())
   level     Int
   programId String
-  program   Program   @relation(fields: [programId], references: [id])
 
+  program   Program   @relation(fields: [programId], references: [id])
   sections  Section[]
+  subjects  Subject[]
 
   @@unique([level, programId])
 }
@@ -137,61 +168,97 @@ model Section {
   name        String
   yearLevelId String
   capacity    Int             @default(40)
-  yearLevel   YearLevel       @relation(fields: [yearLevelId], references: [id])
 
+  yearLevel   YearLevel       @relation(fields: [yearLevelId], references: [id])
   assignments ScheduleEntry[]
 }
 
 model Faculty {
-  id               String               @id @default(cuid())
-  userId           String               @unique
-  departmentId     String
-  employeeId       String               @unique
-  specializations  String[]
-  maxUnitsPerWeek  Int                  @default(21)
-  isActive         Boolean              @default(true)
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
+  id              String                       @id @default(cuid())
+  userId          String                       @unique
+  departmentId    String
+  employeeId      String                       @unique
+  specializations String[]
+  sectionCounts   Json?                        @default("{}") // { "Subject Title": numberOfSections }
+  maxUnitsPerWeek Int                          @default(21)
+  isActive        Boolean                      @default(true)
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
 
-  user             User                 @relation(fields: [userId], references: [id])
-  department       Department           @relation(fields: [departmentId], references: [id])
-
-  availability     FacultyAvailability[]
-  scheduleEntries  ScheduleEntry[]
-  teachingLoads    TeachingLoad[]
+  user                    User                         @relation(fields: [userId], references: [id])
+  department              Department                   @relation(fields: [departmentId], references: [id])
+  availability            FacultyAvailability[]
+  buildingAvailability    FacultyBuildingAvailability[]
+  scheduleEntries         ScheduleEntry[]
+  teachingLoads           TeachingLoad[]
 }
 
 model FacultyAvailability {
-  id         String     @id @default(cuid())
+  id         String    @id @default(cuid())
   facultyId  String
   day        DayOfWeek
   startTime  String
   endTime    String
   semesterId String
 
-  faculty    Faculty    @relation(fields: [facultyId], references: [id], onDelete: Cascade)
-  semester   Semester   @relation(fields: [semesterId], references: [id])
+  faculty    Faculty   @relation(fields: [facultyId], references: [id], onDelete: Cascade)
+  semester   Semester  @relation(fields: [semesterId], references: [id])
 
   @@unique([facultyId, day, startTime, semesterId])
 }
 
+// Records which buildings a faculty member is available to teach in,
+// per semester. The algorithm enforces this as a Hard Constraint —
+// a faculty member cannot be assigned to a room in a building not listed here.
+model FacultyBuildingAvailability {
+  id         String    @id @default(cuid())
+  facultyId  String
+  buildingId String
+  semesterId String
+
+  faculty    Faculty   @relation(fields: [facultyId], references: [id], onDelete: Cascade)
+  building   Building  @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  semester   Semester  @relation(fields: [semesterId], references: [id])
+
+  @@unique([facultyId, buildingId, semesterId])
+  @@index([facultyId, semesterId])
+}
+
 model Building {
-  id    String @id @default(cuid())
-  name  String @unique
-  code  String @unique
-  rooms Room[]
+  id          String               @id @default(cuid())
+  name        String               @unique
+  code        String               @unique
+
+  rooms                Room[]
+  departments          DepartmentBuilding[]
+  facultyAvailability  FacultyBuildingAvailability[]
+}
+
+// Many-to-many: a department may operate across multiple buildings,
+// and a building may house multiple departments.
+model DepartmentBuilding {
+  id           String     @id @default(cuid())
+  departmentId String
+  buildingId   String
+
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  building     Building   @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, buildingId])
 }
 
 model Room {
-  id              String          @id @default(cuid())
-  name            String
-  code            String          @unique
-  buildingId      String
-  type            RoomType
-  capacity        Int
-  equipment       String[]
-  isActive        Boolean         @default(true)
-  createdAt       DateTime        @default(now())
+  id                String             @id @default(cuid())
+  name              String
+  code              String             @unique
+  buildingId        String
+  type              RoomType
+  // Only populated for LABORATORY / COMPUTER_LAB rooms.
+  // Used as a Hard Constraint by the scheduling engine.
+  labSpecialization LabSpecialization?
+  equipment         String[]
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
 
   building        Building        @relation(fields: [buildingId], references: [id])
   scheduleEntries ScheduleEntry[]
@@ -208,36 +275,47 @@ model AcademicYear {
 }
 
 model Semester {
-  id             String               @id @default(cuid())
+  id             String      @id @default(cuid())
   type           SemesterType
   academicYearId String
   startDate      DateTime
   endDate        DateTime
-  isActive       Boolean              @default(false)
-  createdAt      DateTime             @default(now())
+  isActive       Boolean     @default(false)
+  createdAt      DateTime    @default(now())
 
-  academicYear   AcademicYear         @relation(fields: [academicYearId], references: [id])
-  schedules      Schedule[]
-  availability   FacultyAvailability[]
-  teachingLoads  TeachingLoad[]
+  academicYear        AcademicYear                  @relation(fields: [academicYearId], references: [id])
+  schedules           Schedule[]
+  availability        FacultyAvailability[]
+  buildingAvailability FacultyBuildingAvailability[]
+  teachingLoads       TeachingLoad[]
+  workflowStates      DepartmentWorkflowState[]
 
   @@unique([type, academicYearId])
 }
 
 model Subject {
-  id               String          @id @default(cuid())
-  code             String          @unique
-  title            String
-  units            Int
-  hoursPerWeek     Int
-  type             SubjectType
-  departmentId     String
-  requiredRoomType RoomType[]
-  createdAt        DateTime        @default(now())
+  id                       String             @id @default(cuid())
+  code                     String
+  title                    String
+  units                    Int
+  hoursPerWeek             Int
+  type                     SubjectType
+  semester                 SemesterType       @default(FIRST)
+  year                     Int                @default(1)
+  departmentId             String
+  yearLevelId              String?
+  requiredRoomType         RoomType[]
+  // When set, the backtracking engine will only match rooms whose
+  // labSpecialization equals this value (Hard Constraint).
+  requiredLabSpecialization LabSpecialization?
+  createdAt                DateTime           @default(now())
 
-  department       Department      @relation(fields: [departmentId], references: [id])
-  scheduleEntries  ScheduleEntry[]
-  teachingLoads    TeachingLoad[]
+  department      Department      @relation(fields: [departmentId], references: [id])
+  yearLevel       YearLevel?      @relation(fields: [yearLevelId], references: [id])
+  scheduleEntries ScheduleEntry[]
+  teachingLoads   TeachingLoad[]
+
+  @@unique([code, departmentId])
 }
 
 model TeachingLoad {
@@ -256,22 +334,27 @@ model TeachingLoad {
 }
 
 model Schedule {
-  id          String         @id @default(cuid())
-  semesterId  String
-  status      ScheduleStatus @default(DRAFT)
-  generatedAt DateTime?
-  publishedAt DateTime?
-  createdBy   String
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  id           String         @id @default(cuid())
+  semesterId   String
+  departmentId String?
+  status       ScheduleStatus @default(DRAFT)
+  isArchived   Boolean        @default(false)
+  generatedAt  DateTime?
+  publishedAt  DateTime?
+  createdBy    String
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
 
-  semester    Semester       @relation(fields: [semesterId], references: [id])
-  entries     ScheduleEntry[]
-  conflicts   ConflictLog[]
+  semester   Semester        @relation(fields: [semesterId], references: [id])
+  department Department?     @relation(fields: [departmentId], references: [id])
+  entries    ScheduleEntry[]
+  conflicts  ConflictLog[]
+
+  @@index([departmentId])
 }
 
 model ScheduleEntry {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   scheduleId String
   subjectId  String
   facultyId  String
@@ -280,14 +363,16 @@ model ScheduleEntry {
   day        DayOfWeek
   startTime  String
   endTime    String
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  set        String?   // null = LECTURE; "A" or "B" = LABORATORY split groups
+  createdBy  String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
-  schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
-  subject    Subject  @relation(fields: [subjectId], references: [id])
-  faculty    Faculty  @relation(fields: [facultyId], references: [id])
-  room       Room     @relation(fields: [roomId], references: [id])
-  section    Section  @relation(fields: [sectionId], references: [id])
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  subject  Subject  @relation(fields: [subjectId], references: [id])
+  faculty  Faculty  @relation(fields: [facultyId], references: [id])
+  room     Room     @relation(fields: [roomId], references: [id])
+  section  Section  @relation(fields: [sectionId], references: [id])
 
   @@index([scheduleId])
   @@index([facultyId, day])
@@ -304,7 +389,30 @@ model ConflictLog {
   resolved    Boolean  @default(false)
   createdAt   DateTime @default(now())
 
-  schedule    Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+}
+
+// Tracks the submission/approval lifecycle for each department per semester.
+// The SUPER_ADMIN (Department Chair) cannot trigger schedule generation unless
+// the ADMIN (Program Chair) has moved status to SUBMITTED_TO_CHAIR.
+model DepartmentWorkflowState {
+  id           String                   @id @default(cuid())
+  departmentId String
+  semesterId   String
+  status       DepartmentWorkflowStatus @default(DRAFT)
+  submittedBy  String?  // userId of the Program Chair who submitted
+  submittedAt  DateTime?
+  reviewedBy   String?  // userId of the Department Chair who last reviewed
+  reviewedAt   DateTime?
+  reviewNote   String?  // populated on REJECTED status
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id])
+  semester   Semester   @relation(fields: [semesterId], references: [id])
+
+  @@unique([departmentId, semesterId])
+  @@index([departmentId, status])
 }
 
 model Notification {
@@ -316,4 +424,42 @@ model Notification {
   read      Boolean  @default(false)
   link      String?
   createdAt DateTime @default(now())
+
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
+
+model FacultyRequest {
+  id           String    @id @default(cuid())
+  requesterId  String
+  departmentId String
+  subjectId    String?
+  reason       String
+  status       String    @default("PENDING") // PENDING, APPROVED, DENIED
+  respondedBy  String?
+  respondedAt  DateTime?
+  responseNote String?
+  createdAt    DateTime  @default(now())
+
+  @@index([departmentId, status])
+  @@index([requesterId])
+}
+
+model ScheduleSwapRequest {
+  id              String    @id @default(cuid())
+  requesterId     String
+  entryId         String
+  requestedRoomId String
+  requestedDay    String
+  requestedStart  String
+  requestedEnd    String
+  reason          String
+  status          String    @default("PENDING") // PENDING, APPROVED, DENIED
+  respondedBy     String?
+  respondedAt     DateTime?
+  responseNote    String?
+  createdAt       DateTime  @default(now())
+
+  @@index([requesterId])
+  @@index([status])
 }
