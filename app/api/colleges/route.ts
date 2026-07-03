@@ -20,14 +20,26 @@ export async function GET(req: Request) {
     // No semester filter — the curriculum map in the frontend handles
     // placing subjects at the correct year/semester per program.
 
-    // Fetch ALL GEC/GEL/PATHFit/NST subjects (shared education subjects)
-    const gecSubjects = await db.subject.findMany({
+    // Fetch ALL GEC/GEL/PATHFit/NST subjects (shared education subjects).
+    // Multiple departments may have the same code (CIT + CAS both seed GEC subjects).
+    // Deduplicate by code, preferring CAS records as the authoritative GEC source.
+    const gecSubjectsRaw = await db.subject.findMany({
       where: {
         OR: GEC_PREFIXES.map(p => ({ code: { startsWith: p } })),
       },
-      include: { yearLevel: true },
+      include: { yearLevel: true, department: true },
       orderBy: [{ year: "asc" }, { code: "asc" }],
     })
+    const gecByCode = new Map<string, typeof gecSubjectsRaw[0]>()
+    for (const g of gecSubjectsRaw) {
+      const existing = gecByCode.get(g.code)
+      // Prefer the authoritative CAS record; fall back to whatever copy exists (e.g. in CIT track depts)
+      const isCAS = g.department?.abbreviation === "CAS"
+      if (!existing || isCAS) {
+        gecByCode.set(g.code, g)
+      }
+    }
+    const gecSubjects = Array.from(gecByCode.values())
 
     if (isSuperAdmin) {
       // SUPER_ADMIN = Department Chair
@@ -57,16 +69,18 @@ export async function GET(req: Request) {
         orderBy: { abbreviation: "asc" },
       })
 
-      // Department Chair: only show colleges/departments that have subjects or programs
-      // Don't inject GEC subjects into other departments — they have no subjects of their own
+      // Department Chair: only show colleges/departments that have subjects or programs.
+      // For departments WITH programs (CAS, CIT tracks), merge in GEC subjects so the
+      // curriculum map can match them. Departments without programs keep only their own subjects.
       const filtered = colleges
         .map((college) => ({
           ...college,
           departments: college.departments.map((dept) => {
-            // Own department: show all subjects as-is
-            if (dept.id === userDeptId) return dept
-            // Other departments: only show if they have their own subjects
-            return { ...dept, subjects: dept.subjects }
+            const hasProg = dept.programs.length > 0
+            const mergedSubjects = hasProg
+              ? [...dept.subjects, ...gecSubjects.filter(g => !dept.subjects.some((s: any) => s.code === g.code))]
+              : dept.subjects
+            return { ...dept, subjects: mergedSubjects }
           }).filter((dept) => dept.subjects.length > 0 || dept.programs.some((p: any) => p.yearLevels.length > 0)),
         }))
         .filter((college) => college.departments.length > 0)
@@ -99,19 +113,16 @@ export async function GET(req: Request) {
         orderBy: { abbreviation: "asc" },
       })
 
-      const CAS_DEPT_ID = 'cmmzovtv10009qkvur7tude03'
-
-      // CAS ADMIN: dept.subjects already has everything — no need to merge GEC
-      // Other ADMIN: merge their major subjects with GEC subjects
+      // Always merge GEC subjects into every department for display.
+      // GEC subjects now live in SS/LLH/MNS sub-departments; any department with programs
+      // (CAS parent, CIT, etc.) needs them merged in so the curriculum map can match them.
       const filtered = colleges
         .filter((c) => c.departments.length > 0)
         .map((c) => ({
           ...c,
           departments: c.departments.map((dept) => ({
             ...dept,
-            subjects: dept.id === CAS_DEPT_ID
-              ? dept.subjects  // CAS already has all subjects
-              : [...dept.subjects, ...gecSubjects.filter(g => !dept.subjects.some((s: any) => s.code === g.code))],
+            subjects: [...dept.subjects, ...gecSubjects.filter(g => !dept.subjects.some((s: any) => s.code === g.code))],
           })),
         }))
 

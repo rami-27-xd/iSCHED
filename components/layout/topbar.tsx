@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation'
 import { Bell, LogOut, User, Key, CheckCheck, Clock, ShieldCheck, CalendarDays, AlertTriangle, Info, Building2 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { useQuery } from '@tanstack/react-query'
-import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -18,6 +17,9 @@ export interface TopbarProps {
   leading?: React.ReactNode
   userName?: string
   userEmail?: string
+  userRole?: string
+  /** Rendered in the toolbar between the title and the notification bell. */
+  collegeFilter?: React.ReactNode
 }
 
 function getInitials(name?: string): string {
@@ -153,7 +155,7 @@ function timeAgo(date: string) {
   return `${days}d ago`
 }
 
-export function Topbar({ title, leading, userName, userEmail }: TopbarProps) {
+export function Topbar({ title, leading, userName, userEmail, userRole, collegeFilter }: TopbarProps) {
   const router = useRouter()
   const [notifOpen, setNotifOpen] = React.useState(false)
   const { data } = useNotifications()
@@ -183,21 +185,25 @@ export function Topbar({ title, leading, userName, userEmail }: TopbarProps) {
   }
 
   return (
-    <header className="flex h-16 shrink-0 items-center gap-3 border-b bg-card px-4 lg:px-6">
+    <header className="flex h-20 shrink-0 items-center gap-3 border-b bg-card px-5 lg:px-8 shadow-sm">
       {leading}
       <h1 className="text-lg font-semibold text-foreground">{title}</h1>
 
       <div className="ml-auto flex items-center gap-2">
+        {/* Per-college filter — shown for SUPER_ADMIN and ADMIN */}
+        {collegeFilter && (userRole === 'SUPER_ADMIN' || userRole === 'ADMIN') && (
+          <div className="hidden sm:flex items-center">{collegeFilter}</div>
+        )}
+
         {/* Notification bell with popover */}
         <Popover open={notifOpen} onOpenChange={setNotifOpen}>
           <PopoverTrigger
-            render={
-              <Button variant="ghost" size="icon" className="relative" aria-label="Notifications" />
-            }
+            className="relative flex h-9 w-9 items-center justify-center rounded-md hover:bg-accent transition-colors focus:outline-none focus:ring-2 focus:ring-ring"
+            aria-label="Notifications"
           >
             <Bell className="size-4" />
             {unreadCount > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+              <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white leading-none">
                 {unreadCount > 9 ? '9+' : unreadCount}
               </span>
             )}
@@ -226,8 +232,8 @@ export function Topbar({ title, leading, userName, userEmail }: TopbarProps) {
                   <button
                     key={notif.id}
                     onClick={() => handleNotifClick(notif)}
-                    className={`flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50 border-b last:border-0 ${
-                      !notif.read ? 'bg-primary/5' : ''
+                    className={`flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-emerald-50/60 border-b last:border-0 ${
+                      !notif.read ? 'bg-emerald-50 dark:bg-emerald-950/30' : ''
                     }`}
                   >
                     <div className="mt-0.5 shrink-0">

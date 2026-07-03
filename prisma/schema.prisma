@@ -78,27 +78,31 @@ enum DepartmentWorkflowStatus {
 model User {
   id           String          @id @default(cuid())
   supabaseId   String          @unique
-  email        String          @unique
+  email        String?         @unique
   firstName    String
   lastName     String
   role         UserRole        @default(FACULTY)
   isApproved   Boolean         @default(false)
   isActive     Boolean         @default(true)
   departmentId String?
+  // Faculty cluster this SUPER_ADMIN is scoped to (null = access all clusters)
+  clusterId    String?
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
   department      Department?      @relation(fields: [departmentId], references: [id])
+  cluster         FacultyCluster?  @relation(fields: [clusterId], references: [id])
   faculty         Faculty?
   departmentChair DepartmentChair?
   programHead     ProgramHead?
 }
 
 model College {
-  id           String       @id @default(cuid())
-  name         String       @unique
-  abbreviation String       @unique
+  id           String           @id @default(cuid())
+  name         String           @unique
+  abbreviation String           @unique
   departments  Department[]
+  clusters     FacultyCluster[]
 }
 
 model Department {
@@ -106,8 +110,11 @@ model Department {
   name         String
   abbreviation String
   collegeId    String
+  // Which faculty cluster this department belongs to (drives SUPER_ADMIN scoping)
+  clusterId    String?
 
   college        College                   @relation(fields: [collegeId], references: [id])
+  cluster        FacultyCluster?           @relation(fields: [clusterId], references: [id])
   chair          DepartmentChair?
   users          User[]
   programs       Program[]
@@ -115,9 +122,26 @@ model Department {
   subjects       Subject[]
   schedules      Schedule[]
   buildings      DepartmentBuilding[]
+  rooms          DepartmentRoom[]
   workflowStates DepartmentWorkflowState[]
 
   @@unique([abbreviation, collegeId])
+}
+
+// Groups departments into academic divisions (e.g. "Social Sciences Faculty").
+// A SUPER_ADMIN assigned to a cluster can only see/approve data from
+// departments in that cluster.
+model FacultyCluster {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  collegeId   String?  // optional: a cluster can span the whole college
+  createdAt   DateTime @default(now())
+
+  college     College?     @relation(fields: [collegeId], references: [id])
+  departments Department[]
+  supervisors User[]       // SUPER_ADMINs assigned to this cluster
+  programs    Program[]    // programs that belong to this cluster
 }
 
 model DepartmentChair {
@@ -134,10 +158,14 @@ model Program {
   name         String
   abbreviation String
   departmentId String
+  clusterId    String?
 
-  department   Department  @relation(fields: [departmentId], references: [id])
+  department   Department     @relation(fields: [departmentId], references: [id])
+  cluster      FacultyCluster? @relation(fields: [clusterId], references: [id])
   head         ProgramHead?
   yearLevels   YearLevel[]
+  faculty      Faculty[]   // faculty assigned to this program
+  subjects     Subject[]   // program-specific subjects (null programId = shared/GEC)
 
   @@unique([abbreviation, departmentId])
 }
@@ -169,14 +197,16 @@ model Section {
   yearLevelId String
   capacity    Int             @default(40)
 
-  yearLevel   YearLevel       @relation(fields: [yearLevelId], references: [id])
-  assignments ScheduleEntry[]
+  yearLevel        YearLevel         @relation(fields: [yearLevelId], references: [id])
+  assignments      ScheduleEntry[]
+  unassignedEntries UnassignedEntry[]
 }
 
 model Faculty {
   id              String                       @id @default(cuid())
   userId          String                       @unique
   departmentId    String
+  programId       String?                      // assigned to a specific program; null = dept-wide pool
   employeeId      String                       @unique
   specializations String[]
   sectionCounts   Json?                        @default("{}") // { "Subject Title": numberOfSections }
@@ -187,6 +217,7 @@ model Faculty {
 
   user                    User                         @relation(fields: [userId], references: [id])
   department              Department                   @relation(fields: [departmentId], references: [id])
+  program                 Program?                     @relation(fields: [programId], references: [id])
   availability            FacultyAvailability[]
   buildingAvailability    FacultyBuildingAvailability[]
   scheduleEntries         ScheduleEntry[]
@@ -228,6 +259,7 @@ model Building {
   id          String               @id @default(cuid())
   name        String               @unique
   code        String               @unique
+  isActive    Boolean              @default(true)
 
   rooms                Room[]
   departments          DepartmentBuilding[]
@@ -262,6 +294,21 @@ model Room {
 
   building        Building        @relation(fields: [buildingId], references: [id])
   scheduleEntries ScheduleEntry[]
+  departments     DepartmentRoom[]
+}
+
+// Per-room department access control.
+// Zero entries = unrestricted (any department may use this room).
+// One or more entries = only those departments may be scheduled here.
+model DepartmentRoom {
+  id           String @id @default(cuid())
+  departmentId String
+  roomId       String
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  room       Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, roomId])
 }
 
 model AcademicYear {
@@ -303,6 +350,7 @@ model Subject {
   semester                 SemesterType       @default(FIRST)
   year                     Int                @default(1)
   departmentId             String
+  programId                String?            // null = GEC/shared; set = specific to this program
   yearLevelId              String?
   requiredRoomType         RoomType[]
   // When set, the backtracking engine will only match rooms whose
@@ -311,9 +359,11 @@ model Subject {
   createdAt                DateTime           @default(now())
 
   department      Department      @relation(fields: [departmentId], references: [id])
+  program         Program?        @relation(fields: [programId], references: [id])
   yearLevel       YearLevel?      @relation(fields: [yearLevelId], references: [id])
-  scheduleEntries ScheduleEntry[]
-  teachingLoads   TeachingLoad[]
+  scheduleEntries   ScheduleEntry[]
+  teachingLoads     TeachingLoad[]
+  unassignedEntries UnassignedEntry[]
 
   @@unique([code, departmentId])
 }
@@ -349,24 +399,28 @@ model Schedule {
   department Department?     @relation(fields: [departmentId], references: [id])
   entries    ScheduleEntry[]
   conflicts  ConflictLog[]
+  unassigned UnassignedEntry[]
 
   @@index([departmentId])
 }
 
 model ScheduleEntry {
-  id         String    @id @default(cuid())
-  scheduleId String
-  subjectId  String
-  facultyId  String
-  roomId     String
-  sectionId  String
-  day        DayOfWeek
-  startTime  String
-  endTime    String
-  set        String?   // null = LECTURE; "A" or "B" = LABORATORY split groups
-  createdBy  String?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id           String    @id @default(cuid())
+  scheduleId   String
+  subjectId    String
+  facultyId    String
+  // Free-text faculty name typed by the Program Chair. When set, this is
+  // displayed instead of the linked faculty record's name.
+  facultyName  String?
+  roomId       String
+  sectionId    String
+  day          DayOfWeek
+  startTime    String
+  endTime      String
+  set          String?   // null = LECTURE; "A" or "B" = LABORATORY split groups
+  createdBy    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
   subject  Subject  @relation(fields: [subjectId], references: [id])
@@ -378,6 +432,22 @@ model ScheduleEntry {
   @@index([facultyId, day])
   @@index([roomId, day])
   @@index([sectionId, day])
+}
+
+model UnassignedEntry {
+  id         String   @id @default(cuid())
+  scheduleId String
+  subjectId  String
+  sectionId  String
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  subject  Subject  @relation(fields: [subjectId], references: [id])
+  section  Section  @relation(fields: [sectionId], references: [id])
+
+  @@index([scheduleId])
+  @@map("unassigned_entries")
 }
 
 model ConflictLog {

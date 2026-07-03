@@ -40,6 +40,7 @@ import {
   CalendarDays,
   Globe,
   BellRing,
+  BookOpen,
   Filter,
   Plus,
   AlertTriangle,
@@ -76,6 +77,8 @@ import { useSubjects, useSections } from "@/hooks/use-data"
 import { RoleGuard } from "@/components/shared/role-guard"
 import { useRealtimeSchedules } from "@/hooks/use-realtime"
 import { getCurriculumCodes, hasCurriculumMap } from "@/lib/curriculum-map"
+import { WorkflowActions } from "@/components/schedule/workflow-actions"
+import { useCollege } from "@/lib/college-context"
 
 const DAYS = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]
 
@@ -104,6 +107,7 @@ function ScheduleStatusBadge({ status }: { status?: string }) {
 
 export default function SchedulesPage() {
   const [tab, setTab] = useState("active")
+  const [deptFilter, setDeptFilter] = useState("")   // department filter inside the schedule list
   const [view, setView] = useState("list")
   const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null)
 
@@ -120,6 +124,7 @@ export default function SchedulesPage() {
   const [entryForm, setEntryForm] = useState({
     subjectId: "",
     facultyId: "",
+    facultyName: "",   // free-text override — sent alongside facultyId
     roomId: "",
     sectionId: "",
     day: "",
@@ -127,6 +132,13 @@ export default function SchedulesPage() {
     endTime: "",
     set: "" as "" | "A" | "B",
   })
+  // Controls the faculty autocomplete dropdown visibility
+  const [facultySearch, setFacultySearch] = useState("")
+  const [facultyDropdownOpen, setFacultyDropdownOpen] = useState(false)
+  const facultyComboRef = useRef<HTMLDivElement>(null)
+
+  // Delete confirmation dialog
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
 
   // Pre-publish validation dialog
   const [publishValidationOpen, setPublishValidationOpen] = useState(false)
@@ -152,6 +164,17 @@ export default function SchedulesPage() {
     return () => document.removeEventListener("mousedown", handleClick)
   }, [])
 
+  // Close faculty autocomplete dropdown when clicking outside
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (facultyComboRef.current && !facultyComboRef.current.contains(e.target as Node)) {
+        setFacultyDropdownOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClick)
+    return () => document.removeEventListener("mousedown", handleClick)
+  }, [])
+
   // Fetch current user role for access control
   const { data: currentUser } = useQuery({
     queryKey: ["current-user-role"],
@@ -166,8 +189,14 @@ export default function SchedulesPage() {
   const isSuperAdmin = userRole === "SUPER_ADMIN"
   const isAdmin = userRole === "ADMIN"
 
-  const { data: activeSchedules = [], isLoading: loadingActive } = useSchedules(undefined, false)
-  const { data: archivedSchedules = [], isLoading: loadingArchived } = useSchedules(undefined, true)
+  // College filter from topbar — SUPER_ADMINs (Dept Chairs) always see ALL schedules
+  // because they inject GEC subjects into every program's schedule after submission.
+  // ADMIN (Program Chair) keeps the college filter.
+  const { selectedCollegeId } = useCollege()
+  const scheduleCollegeFilter = isSuperAdmin ? undefined : selectedCollegeId
+
+  const { data: activeSchedules = [], isLoading: loadingActive } = useSchedules(undefined, false, scheduleCollegeFilter)
+  const { data: archivedSchedules = [], isLoading: loadingArchived } = useSchedules(undefined, true, scheduleCollegeFilter)
   const { data: selectedSchedule, isLoading: loadingSchedule } = useSchedule(selectedScheduleId)
   // Derive schedule semester type (FIRST | SECOND | SUMMER) for subject filtering
   const scheduleSemesterType = selectedSchedule?.semester?.type as string | undefined
@@ -176,6 +205,22 @@ export default function SchedulesPage() {
   const { data: facultyList = [] } = useFaculty()
   const { data: rooms = [] } = useRooms()
   const { data: sections = [] } = useSections()
+
+  // Department-restricted rooms: only rooms in buildings assigned to the
+  // schedule's department. Falls back to all rooms if no department is set.
+  const scheduleDeptId = selectedSchedule?.departmentId ?? selectedSchedule?.department?.id
+  const { data: departmentRooms = [] } = useQuery({
+    queryKey: ["rooms-by-department", scheduleDeptId],
+    queryFn: async () => {
+      if (!scheduleDeptId) return rooms
+      const res = await fetch(`/api/rooms?departmentId=${scheduleDeptId}`)
+      const json = await res.json()
+      if (!res.ok) return rooms
+      return json.data ?? rooms
+    },
+    enabled: !!scheduleDeptId,
+    staleTime: 60_000,
+  })
 
   // Fetch availability for the selected faculty (for time slot filtering in Add Entry)
   const { data: facultyAvailability = [] } = useQuery({
@@ -258,38 +303,58 @@ export default function SchedulesPage() {
       }
     }
 
+    // Always include the pre-selected subject (set via "Manually Assign") even if
+    // curriculum-map filtering would exclude it (e.g. wrong year slot or cross-program subject).
+    if (entryForm.subjectId && !pool.some((s: any) => s.id === entryForm.subjectId)) {
+      const forced = subjects.find((s: any) => s.id === entryForm.subjectId)
+      if (forced) pool = [forced, ...pool]
+    }
+
     return pool
-  }, [subjects, entryForm.facultyId, entryForm.sectionId, selectedFacultyForEntry, selectedSectionForEntry, scheduleSemesterType, sections, selectedSchedule])
+  }, [subjects, entryForm.facultyId, entryForm.sectionId, entryForm.subjectId, selectedFacultyForEntry, selectedSectionForEntry, scheduleSemesterType, sections, selectedSchedule])
 
   // Bidirectional: when subject is selected, show only faculty whose specializations match
   // Always exclude inactive faculty
   const filteredFaculty = useMemo(() => {
     const activeFaculty = facultyList.filter((f: any) => f.isActive !== false && f.user?.isActive !== false)
-    if (!entryForm.subjectId || !selectedSubjectForEntry) return activeFaculty
+
+    // Scope to the subject's department so each user sees relevant faculty:
+    // SUPER_ADMIN selecting a GEC subject sees CAS faculty; ADMIN selecting ITE sees CIT faculty.
+    // Falls back to all active faculty if the subject's dept has no matching faculty records.
+    const subjectDeptId = selectedSubjectForEntry?.departmentId
+    const deptScoped = subjectDeptId
+      ? activeFaculty.filter((f: any) => f.departmentId === subjectDeptId)
+      : activeFaculty
+    const pool = deptScoped.length > 0 ? deptScoped : activeFaculty
+
+    if (!entryForm.subjectId || !selectedSubjectForEntry) return pool
     const subjectTitle = (selectedSubjectForEntry.title ?? "").toLowerCase()
-    if (!subjectTitle) return activeFaculty
-    const matched = activeFaculty.filter((f: any) => {
+    if (!subjectTitle) return pool
+    const matched = pool.filter((f: any) => {
       const specs: string[] = f.specializations ?? []
       if (specs.length === 0) return false
       return specs.some((sp: string) => sp.toLowerCase() === subjectTitle || subjectTitle.includes(sp.toLowerCase()))
     })
-    return matched.length > 0 ? matched : activeFaculty
+    return matched.length > 0 ? matched : pool
   }, [facultyList, entryForm.subjectId, selectedSubjectForEntry])
 
-  // Filter rooms by subject type: LABORATORY subjects → LABORATORY rooms only, LECTURE → LECTURE_ROOM only
+  // Filter rooms by subject type AND department-building restriction.
+  // Uses departmentRooms (already filtered to the dept's buildings) as the source pool.
   const filteredRooms = useMemo(() => {
-    if (!entryForm.subjectId || !selectedSubjectForEntry) return rooms
+    // Use department-restricted rooms when available, fall back to all rooms
+    const pool = departmentRooms.length > 0 ? departmentRooms : rooms
+    if (!entryForm.subjectId || !selectedSubjectForEntry) return pool
     const subjectType = selectedSubjectForEntry.type
     if (subjectType === 'LABORATORY') {
-      const labs = rooms.filter((r: any) => r.type === 'LABORATORY')
-      return labs.length > 0 ? labs : rooms
+      const labs = pool.filter((r: any) => r.type === 'LABORATORY' || r.type === 'COMPUTER_LAB' || r.type === 'LECTURE_LAB')
+      return labs.length > 0 ? labs : pool
     }
     if (subjectType === 'LECTURE') {
-      const lectureRooms = rooms.filter((r: any) => r.type === 'LECTURE_ROOM')
-      return lectureRooms.length > 0 ? lectureRooms : rooms
+      const lectureRooms = pool.filter((r: any) => r.type === 'LECTURE_ROOM')
+      return lectureRooms.length > 0 ? lectureRooms : pool
     }
-    return rooms
-  }, [rooms, entryForm.subjectId, selectedSubjectForEntry])
+    return pool
+  }, [rooms, departmentRooms, entryForm.subjectId, selectedSubjectForEntry])
 
   // Issue 9: Filter time options based on faculty availability for selected day
   const availableTimeOptions = useMemo(() => {
@@ -369,6 +434,11 @@ export default function SchedulesPage() {
     return filtered.length > 0 ? filtered : DAYS
   }, [entryForm.facultyId, facultyAvailability])
 
+  // Conflict override dialog state (soft-validation)
+  const [conflictMessage, setConflictMessage] = useState<string | null>(null)
+  const [pendingForceChanges, setPendingForceChanges] = useState<Record<string, unknown> | null>(null)
+  const [forceEntryId, setForceEntryId] = useState<string | null>(null)
+
   // Edit entry state
   const [editEntryOpen, setEditEntryOpen] = useState(false)
   const [editEntryId, setEditEntryId] = useState<string | null>(null)
@@ -414,24 +484,31 @@ export default function SchedulesPage() {
   const editSelectedFaculty = useMemo(() => facultyList.find((f: any) => f.id === editEntryForm.facultyId), [facultyList, editEntryForm.facultyId])
   const editSelectedSubject = useMemo(() => subjects.find((s: any) => s.id === editEntryForm.subjectId), [subjects, editEntryForm.subjectId])
 
-  // Edit: filter subjects by selected faculty's specializations + semester
+  // Edit: filter subjects by selected faculty's specializations
   const editFilteredSubjects = useMemo(() => {
     let pool = subjects
 
-    // Extra client-side semester guard
-    if (scheduleSemesterType) {
-      pool = pool.filter((s: any) => s.semester === scheduleSemesterType)
-    }
-
-    // Exclude subjects already scheduled for this section (except the current entry being edited)
+    // Exclude subjects already fully-scheduled for this section, except:
+    // - the entry currently being edited (always keep its subject in the pool)
+    // - lab subjects with A/B sets: editing Set-A should not block the same subject
+    //   just because Set-B is also scheduled for the section
     if (editEntryForm.sectionId) {
       const scheduleEntries: any[] = selectedSchedule?.entries ?? []
+      const currentEntry = scheduleEntries.find((e: any) => e.id === editEntryId)
+      const currentSet = currentEntry?.set ?? editEntryForm.set ?? null
+
       const alreadyScheduledCodes = new Set(
         scheduleEntries
-          .filter((e: any) =>
-            (e.sectionId ?? e.section?.id) === editEntryForm.sectionId &&
-            e.id !== editEntryId
-          )
+          .filter((e: any) => {
+            if ((e.sectionId ?? e.section?.id) !== editEntryForm.sectionId) return false
+            if (e.id === editEntryId) return false
+            // Same subject with the same set as the entry being edited → sibling set entry;
+            // don't let it block the subject from appearing in the dropdown.
+            const sameSubjectCode = (e.subject?.code ?? "").toLowerCase() ===
+              (currentEntry?.subject?.code ?? "").toLowerCase()
+            if (sameSubjectCode && currentSet && e.set && e.set !== currentSet) return false
+            return true
+          })
           .map((e: any) => (e.subject?.code ?? "").toLowerCase())
           .filter(Boolean)
       )
@@ -451,7 +528,7 @@ export default function SchedulesPage() {
       if (matched.length > 0) return matched
     }
     return pool
-  }, [subjects, editEntryForm.facultyId, editEntryForm.sectionId, editSelectedFaculty, scheduleSemesterType, selectedSchedule, editEntryId])
+  }, [subjects, editEntryForm.facultyId, editEntryForm.sectionId, editEntryForm.set, editSelectedFaculty, selectedSchedule, editEntryId])
 
   // Edit: filter faculty by selected subject
   const editFilteredFaculty = useMemo(() => {
@@ -467,12 +544,21 @@ export default function SchedulesPage() {
     return matched.length > 0 ? matched : activeFaculty
   }, [facultyList, editEntryForm.subjectId, editSelectedSubject])
 
-  // Edit: filter rooms by subject type
+  // Edit: filter rooms by subject's required room type, falling back to subject type
   const editFilteredRooms = useMemo(() => {
     if (!editEntryForm.subjectId || !editSelectedSubject) return rooms
+    // Prefer explicit requiredRoomType list set on the subject
+    const requiredTypes: string[] = editSelectedSubject.requiredRoomType ?? []
+    if (requiredTypes.length > 0) {
+      const filtered = rooms.filter((r: any) => requiredTypes.includes(r.type))
+      return filtered.length > 0 ? filtered : rooms
+    }
+    // Fall back: lab subjects can use any lab-category room
     const subjectType = editSelectedSubject.type
     if (subjectType === 'LABORATORY') {
-      const labs = rooms.filter((r: any) => r.type === 'LABORATORY')
+      const labs = rooms.filter((r: any) =>
+        r.type === 'LABORATORY' || r.type === 'COMPUTER_LAB' || r.type === 'LECTURE_LAB'
+      )
       return labs.length > 0 ? labs : rooms
     }
     if (subjectType === 'LECTURE') {
@@ -560,10 +646,45 @@ export default function SchedulesPage() {
   const unpublishSchedule = useUnpublishSchedule()
   const archiveSchedule = useArchiveSchedule()
 
-  // API already filters by department + role; just use what comes back
-  const allActiveSchedules = tab === "active" ? activeSchedules : archivedSchedules
-  const schedules = allActiveSchedules
   const isLoading = tab === "active" ? loadingActive : loadingArchived
+
+  // Build unique department options from every schedule we received (both tabs)
+  // so the filter dropdown is stable and doesn't jump when switching tabs.
+  const deptOptions = useMemo(() => {
+    const map = new Map<string, string>()
+    const allSchedules = [...activeSchedules as any[], ...archivedSchedules as any[]]
+    const visible = isAdmin && adminDeptId
+      ? allSchedules.filter((s: any) => (s.departmentId ?? s.department?.id) === adminDeptId)
+      : allSchedules
+    visible.forEach((s: any) => {
+      if (s.department?.id)
+        map.set(s.department.id, s.department.abbreviation ?? s.department.name ?? "")
+    })
+    return Array.from(map, ([id, label]) => ({ id, label })).sort((a, b) =>
+      a.label.localeCompare(b.label)
+    )
+  }, [activeSchedules, archivedSchedules, isAdmin, adminDeptId])
+
+  // Apply dept filter on top of the active/archived tab selection.
+  // ADMIN (Program Chair): only show their own department's schedules.
+  const visibleActiveCount = useMemo(() => {
+    if (!isAdmin || !adminDeptId) return (activeSchedules as any[]).length
+    return (activeSchedules as any[]).filter((s: any) => (s.departmentId ?? s.department?.id) === adminDeptId).length
+  }, [activeSchedules, isAdmin, adminDeptId])
+
+  const visibleArchivedCount = useMemo(() => {
+    if (!isAdmin || !adminDeptId) return (archivedSchedules as any[]).length
+    return (archivedSchedules as any[]).filter((s: any) => (s.departmentId ?? s.department?.id) === adminDeptId).length
+  }, [archivedSchedules, isAdmin, adminDeptId])
+
+  const schedules = useMemo(() => {
+    let base = tab === "active" ? activeSchedules as any[] : archivedSchedules as any[]
+    if (isAdmin && adminDeptId) {
+      base = base.filter((s: any) => (s.departmentId ?? s.department?.id) === adminDeptId)
+    }
+    if (!deptFilter) return base
+    return base.filter((s: any) => s.department?.id === deptFilter)
+  }, [tab, activeSchedules, archivedSchedules, deptFilter, isAdmin, adminDeptId])
 
   const entries: any[] = selectedSchedule?.entries ?? []
 
@@ -627,27 +748,48 @@ export default function SchedulesPage() {
   }, [entryForm.startTime, availableTimeOptions, occupiedSlots])
 
   const isDraft = selectedSchedule?.status === "DRAFT"
+  const isPendingApproval = selectedSchedule?.status === "PENDING_APPROVAL"
   const isPublished = selectedSchedule?.status === "PUBLISHED"
   // ── Permission model ──────────────────────────────────────────────────────
   // Dept Chair (SUPER_ADMIN):
-  //   - Full control on DRAFT: add/edit/delete entries, generate, publish
-  //   - Can unpublish a PUBLISHED schedule back to DRAFT
+  //   - Can add/edit/generate entries on PENDING_APPROVAL and PUBLISHED
+  //   - Can approve/reject on PENDING_APPROVAL, unpublish on PUBLISHED
   // Program Chair (ADMIN):
-  //   - Can view PUBLISHED schedules
-  //   - Can ADD their own major subject entries to PUBLISHED schedules
-  //   - Can edit/delete only entries THEY created
-  //   - Can click "Notify Faculty" on PUBLISHED schedules (sends notifications)
-  const canModifyEntries = isSuperAdmin && isDraft
-  const canAddEntry = (isSuperAdmin && isDraft) || (isAdmin && isPublished)
-  const canGenerate = isSuperAdmin && isDraft
-  const canPublish = (isSuperAdmin && isDraft) || (isAdmin && isPublished)
+  //   - Owns the DRAFT: adds entries and submits for review
+  //   - After submission, schedule is locked until Dept Chair acts
+  // ── Three-step scheduling workflow ───────────────────────────────────────
+  // Step 1 (Dept Chair): Initializes schedule framework, sets room availability.
+  // Step 2 (Program Chair): Generates/manually adds major subjects. Submits for review.
+  // Step 3 (Dept Chair): Reviews submitted majors, then generates GEC/minor subjects.
+  //
+  // SUPER_ADMIN also has full visibility of all Program Chair schedules to detect
+  // room conflicts across colleges.
+
+  // ADMIN can only modify schedules that belong to their own department.
+  // Without this, an ADMIN sees the CAS Dept Chair's Published schedule and
+  // incorrectly gets "Notify Faculty" / "Add Entry" buttons on it.
+  const isOwnSchedule = !isAdmin || !selectedSchedule || (
+    (selectedSchedule?.departmentId ?? selectedSchedule?.department?.id) === adminDeptId
+  )
+
+  const canModifyEntries = isSuperAdmin || (isAdmin && isOwnSchedule && isDraft)
+  const canAddEntry = isSuperAdmin || (isAdmin && isOwnSchedule && isDraft)
+  // Step 2: ADMIN generates major subjects on DRAFT only.
+  // Step 3: SUPER_ADMIN generates GEC/minor subjects after at least one ADMIN has submitted.
+  //   The API gate enforces this — the UI just needs to allow the button to show.
+  const canGenerate =
+    (isSuperAdmin) ||
+    (isAdmin && isOwnSchedule && isDraft)
+  // SUPER_ADMIN: publish from PENDING_APPROVAL (approve ADMIN submission). Can also directly publish DRAFT.
+  // ADMIN: "Notify Faculty" action on an already-PUBLISHED schedule (does not change status)
+  const canPublish = (isSuperAdmin && (isDraft || isPendingApproval)) || (isAdmin && isOwnSchedule && isPublished)
   const canUnpublish = isSuperAdmin && isPublished
   const canDelete = isSuperAdmin
   const currentUserId = currentUser?.id ?? ""
   const canEditEntry = (entry: any) => {
-    if (isSuperAdmin && isDraft) return true
-    // Program Chair: only their own entries on published schedules
-    if (isAdmin && isPublished && entry.createdBy && entry.createdBy === currentUserId) return true
+    if (isSuperAdmin && (isPendingApproval || isPublished)) return true
+    // Program Chair: only their own entries, only while schedule is still DRAFT
+    if (isAdmin && isOwnSchedule && isDraft && entry.createdBy && entry.createdBy === currentUserId) return true
     return false
   }
 
@@ -715,15 +857,27 @@ export default function SchedulesPage() {
 
   async function handleCreate() {
     if (!newSemType || !newSchoolYear || !newStartDate || !newEndDate) return toast.error("Please fill in all fields")
-    if (!/^\d{4}-\d{4}$/.test(newSchoolYear)) return toast.error("School year format: YYYY-YYYY (e.g. 2025-2026)")
+    const normalizedSY = newSchoolYear.trim().replace(/[\s_]+/, '-')
+    if (!/^\d{4}-\d{4}$/.test(normalizedSY)) return toast.error("School year format: YYYY-YYYY (e.g. 2025-2026 or 2025 2026)")
     if (new Date(newStartDate) >= new Date(newEndDate)) return toast.error("End date must be after start date")
     try {
-      await createSchedule.mutateAsync({ semesterType: newSemType, schoolYear: newSchoolYear, startDate: newStartDate, endDate: newEndDate })
+      const newSchedule = await createSchedule.mutateAsync({
+        semesterType: newSemType,
+        schoolYear: normalizedSY,
+        startDate: newStartDate,
+        endDate: newEndDate,
+      })
       setCreateOpen(false)
       setNewSemType("")
       setNewSchoolYear("")
       setNewStartDate("")
       setNewEndDate("")
+      // ── Auto-select the new schedule so it is immediately visible ──
+      if (newSchedule?.id) {
+        setTab("active")      // new schedules are always active
+        setDeptFilter("")     // clear dept filter so it isn't hidden
+        setSelectedScheduleId(newSchedule.id)
+      }
       toast.success("Schedule created")
     } catch (err: any) {
       toast.error(err.message)
@@ -736,9 +890,16 @@ export default function SchedulesPage() {
     if (!selectedScheduleId) return
     setGenerateError(null)
     try {
-      await generateSchedule.mutateAsync(selectedScheduleId)
+      const genResult = await generateSchedule.mutateAsync(selectedScheduleId)
       setGenerateOpen(false)
-      toast.success("Schedule generated successfully")
+      if (genResult?.unassignedCount > 0) {
+        toast.warning(
+          `${genResult.entriesGenerated} entries scheduled. ${genResult.unassignedCount} subject(s) could not be assigned — see the Unassigned Queue below.`,
+          { duration: 8000 }
+        )
+      } else {
+        toast.success(`Schedule generated: ${genResult?.entriesGenerated ?? "all"} entries assigned`)
+      }
     } catch (err: any) {
       const details: string[] = err.details ?? []
       setGenerateError({ message: err.message, details })
@@ -748,7 +909,12 @@ export default function SchedulesPage() {
 
   async function handleAddEntry() {
     if (!selectedScheduleId) return
-    const { subjectId, facultyId, roomId, sectionId, day, startTime, endTime } = entryForm
+    const { subjectId, facultyId, facultyName, roomId, sectionId, day, startTime, endTime } = entryForm
+
+    // Require either a linked faculty OR a free-text name
+    if (!facultyId && !facultyName?.trim()) {
+      return toast.error("Please enter a faculty name")
+    }
 
     // Check if faculty has subjects available
     if (facultyId && filteredSubjects.length === 0) {
@@ -759,8 +925,8 @@ export default function SchedulesPage() {
       return toast.error("No sections found for this subject. Please create sections in Courses / Departments first.")
     }
 
-    if (!subjectId || !facultyId || !roomId || !sectionId || !day || !startTime || !endTime) {
-      return toast.error("Please fill in all fields")
+    if (!subjectId || !roomId || !sectionId || !day || !startTime || !endTime) {
+      return toast.error("Please fill in all required fields")
     }
 
     // Inactive faculty check
@@ -837,9 +1003,16 @@ export default function SchedulesPage() {
     }
 
     try {
-      await createEntry.mutateAsync({ scheduleId: selectedScheduleId, entry: entryForm })
+      await createEntry.mutateAsync({
+        scheduleId: selectedScheduleId,
+        entry: {
+          ...entryForm,
+          facultyName: entryForm.facultyName?.trim() || null,
+        },
+      })
       setAddEntryOpen(false)
-      setEntryForm({ subjectId: "", facultyId: "", roomId: "", sectionId: "", day: "", startTime: "", endTime: "", set: "" })
+      setEntryForm({ subjectId: "", facultyId: "", facultyName: "", roomId: "", sectionId: "", day: "", startTime: "", endTime: "", set: "" })
+      setFacultySearch("")
       toast.success("Entry added")
     } catch (err: any) {
       toast.error(err.message)
@@ -945,14 +1118,51 @@ export default function SchedulesPage() {
     }
 
     try {
-      await updateEntry.mutateAsync({
+      const result = await updateEntry.mutateAsync({
         scheduleId: selectedScheduleId,
         entryId: editEntryId,
         changes: editEntryForm,
       })
       setEditEntryOpen(false)
       setEditEntryId(null)
-      toast.success("Entry updated")
+      if (result.warning) {
+        toast.warning(`Saved with conflict: ${result.warning}`, { duration: 6000 })
+      } else {
+        toast.success("Entry updated")
+      }
+    } catch (err: any) {
+      // Detect conflict errors — offer soft-validation override instead of hard-blocking
+      const isConflict = err.message && (
+        err.message.toLowerCase().includes("conflict") ||
+        err.message.toLowerCase().includes("already assigned") ||
+        err.message.toLowerCase().includes("double-booked") ||
+        err.message.toLowerCase().includes("not available") ||
+        err.message.toLowerCase().includes("specialization mismatch")
+      )
+      if (isConflict && editEntryId) {
+        setConflictMessage(err.message)
+        setPendingForceChanges({ ...editEntryForm })
+        setForceEntryId(editEntryId)
+      } else {
+        toast.error(err.message)
+      }
+    }
+  }
+
+  async function handleForceOverride() {
+    if (!pendingForceChanges || !forceEntryId || !selectedScheduleId) return
+    try {
+      const result = await updateEntry.mutateAsync({
+        scheduleId: selectedScheduleId,
+        entryId: forceEntryId,
+        changes: { ...pendingForceChanges, force: true },
+      })
+      setConflictMessage(null)
+      setPendingForceChanges(null)
+      setForceEntryId(null)
+      setEditEntryOpen(false)
+      setEditEntryId(null)
+      toast.warning(result.warning ? `Saved with conflict: ${result.warning}` : "Entry saved (conflict overridden)", { duration: 6000 })
     } catch (err: any) {
       toast.error(err.message)
     }
@@ -1100,6 +1310,20 @@ export default function SchedulesPage() {
 
   return (
     <RoleGuard allowedRoles={["SUPER_ADMIN", "ADMIN"]}>
+
+    {/* ── Full-page loading overlay shown while a new schedule is being created ── */}
+    {createSchedule.isPending && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/75 backdrop-blur-sm">
+        <div className="flex flex-col items-center gap-4 rounded-2xl border bg-card px-12 py-10 shadow-2xl">
+          <Loader2 className="h-10 w-10 animate-spin text-[#1B4332]" />
+          <div className="text-center">
+            <p className="text-sm font-semibold text-foreground">Creating Schedule…</p>
+            <p className="text-xs text-muted-foreground mt-1">Setting up semester and academic year</p>
+          </div>
+        </div>
+      </div>
+    )}
+
     <div className="space-y-6">
       {/* Faculty guard — redirect them to /dashboard/my-schedule */}
       {userRole === "FACULTY" ? (
@@ -1114,11 +1338,9 @@ export default function SchedulesPage() {
       ) : (
       <>
       <PageHeader
-        title="Schedules"
-        description={isAdmin ? "View published schedules and manage entries for your program" : "Generate, manage, and publish class schedules"}
         action={
           <div className="flex flex-wrap items-center gap-2">
-            {isSuperAdmin && (
+            {(isSuperAdmin || isAdmin) && (
               <Button variant="outline" size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="mr-2 h-4 w-4" />
                 <span className="hidden sm:inline">New Schedule</span>
@@ -1189,15 +1411,86 @@ export default function SchedulesPage() {
         }
       />
 
+      {/* ── Workflow Action Strip ─────────────────────────────────────────────
+          Shows "Submit for Review" (ADMIN on DRAFT) or "Approve / Reject"
+          (SUPER_ADMIN on PENDING_APPROVAL) for the currently selected schedule.
+      ── */}
+      {selectedScheduleId && selectedSchedule && (
+        <WorkflowActions
+          scheduleId={selectedScheduleId}
+          status={selectedSchedule.status}
+          userRole={userRole}
+          departmentName={selectedSchedule.department?.name}
+          onStatusChange={() => {
+            // Invalidation is handled inside WorkflowActions via useQueryClient
+          }}
+        />
+      )}
+
+      {/* Read-only banner — ADMIN viewing another department's schedule */}
+      {isAdmin && selectedScheduleId && !isOwnSchedule && (
+        <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+          <BookOpen className="h-4 w-4 shrink-0 mt-0.5 text-blue-600" />
+          <div>
+            <p className="font-medium">Department Chairperson&apos;s Schedule — Read Only</p>
+            <p className="mt-0.5 text-blue-700">
+              This schedule belongs to the CAS Department Chairperson. To manage your program&apos;s subjects,
+              use the <strong>New Schedule</strong> button to create your own schedule.
+            </p>
+          </div>
+        </div>
+      )}
+
+
       <div className="grid gap-4 sm:gap-6 lg:grid-cols-[280px_1fr]">
         {/* Left: Schedule List */}
         <div className="space-y-3">
+          {/* Active / Archived tabs */}
           <Tabs value={tab} onValueChange={(v) => { if (v) { setTab(v); setSelectedScheduleId(null) } }}>
             <TabsList className="w-full">
-              <TabsTrigger value="active" className="flex-1">Active</TabsTrigger>
-              <TabsTrigger value="archived" className="flex-1">Archived</TabsTrigger>
+              <TabsTrigger value="active" className="flex-1">
+                Active
+                {visibleActiveCount > 0 && (
+                  <span className="ml-1.5 rounded-full bg-[#1B4332]/15 text-[#1B4332] px-1.5 py-0.5 text-[10px] font-semibold leading-none">
+                    {visibleActiveCount}
+                  </span>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="archived" className="flex-1">
+                Archived
+                {visibleArchivedCount > 0 && (
+                  <span className="ml-1.5 rounded-full bg-muted text-muted-foreground px-1.5 py-0.5 text-[10px] font-semibold leading-none">
+                    {visibleArchivedCount}
+                  </span>
+                )}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
+
+          {/* Department filter — visible only when SUPER_ADMIN sees multiple departments */}
+          {deptOptions.length > 1 && (
+            <div className="flex items-center gap-1.5">
+              <Filter className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <select
+                value={deptFilter}
+                onChange={(e) => { setDeptFilter(e.target.value); setSelectedScheduleId(null) }}
+                className="flex-1 h-8 rounded-lg border border-input bg-background px-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring truncate"
+              >
+                <option value="">All Departments</option>
+                {deptOptions.map((d) => (
+                  <option key={d.id} value={d.id}>{d.label}</option>
+                ))}
+              </select>
+              {deptFilter && (
+                <button
+                  onClick={() => { setDeptFilter(""); setSelectedScheduleId(null) }}
+                  className="text-[10px] text-red-500 hover:text-red-600 underline shrink-0"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
 
           {isLoading ? (
             <div className="flex h-24 items-center justify-center text-muted-foreground text-sm">
@@ -1206,7 +1499,9 @@ export default function SchedulesPage() {
             </div>
           ) : schedules.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-              No {tab} schedules
+              {deptFilter
+                ? `No ${tab} schedules for this department`
+                : `No ${tab} schedules`}
             </div>
           ) : (
             <div className="space-y-2">
@@ -1288,17 +1583,7 @@ export default function SchedulesPage() {
                       variant="ghost"
                       size="sm"
                       className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                      onClick={() => {
-                        if (window.confirm("Are you sure you want to permanently delete this schedule? This cannot be undone.")) {
-                          deleteSchedule.mutate(selectedScheduleId, {
-                            onSuccess: () => {
-                              setSelectedScheduleId(null)
-                              toast.success("Schedule deleted")
-                            },
-                            onError: (err: any) => toast.error(err.message),
-                          })
-                        }
-                      }}
+                      onClick={() => setDeleteConfirmOpen(true)}
                       disabled={deleteSchedule.isPending}
                     >
                       <Trash2 className="mr-1 h-3.5 w-3.5" />
@@ -1447,7 +1732,11 @@ export default function SchedulesPage() {
                                               <span className="text-[11px] sm:text-xs text-muted-foreground truncate">{entry.subject?.title}</span>
                                             </div>
                                             <div className="flex flex-wrap items-center gap-x-2 sm:gap-x-3 gap-y-0.5 mt-0.5 text-[11px] sm:text-xs text-muted-foreground">
-                                              <span>{entry.faculty?.user?.firstName} {entry.faculty?.user?.lastName}</span>
+                                              <span>
+                                                {entry.facultyName ||
+                                                  `${entry.faculty?.user?.firstName ?? ""} ${entry.faculty?.user?.lastName ?? ""}`.trim() ||
+                                                  "—"}
+                                              </span>
                                               <span className="font-mono">{entry.room?.code}</span>
                                               <span>{entry.section?.name}</span>
                                             </div>
@@ -1539,8 +1828,8 @@ export default function SchedulesPage() {
                     entries={calendarEntries}
                     semesterStartDate={selectedSchedule?.semester?.startDate?.slice(0, 10)}
                     semesterEndDate={selectedSchedule?.semester?.endDate?.slice(0, 10)}
-                    onEditEntry={canModifyEntries ? handleOpenEditEntry : isAdmin && isPublished ? (entryId: string) => {
-                      // Program Chair: only allow editing their own entries
+                    onEditEntry={canModifyEntries ? handleOpenEditEntry : isAdmin && isDraft ? (entryId: string) => {
+                      // Program Chair: only allow editing their own entries while DRAFT
                       const entry = entries.find((e: any) => e.id === entryId)
                       if (entry && canEditEntry(entry)) {
                         handleOpenEditEntry(entryId)
@@ -1551,6 +1840,55 @@ export default function SchedulesPage() {
                   />
                 </TabsContent>
               </Tabs>
+
+              {/* ── Unassigned Queue ── */}
+              {selectedSchedule?.unassigned?.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex items-center gap-2 mb-3">
+                    <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                    <span className="text-sm font-semibold text-amber-700">
+                      Unassigned Queue ({selectedSchedule.unassigned.length})
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      — these subjects could not be automatically scheduled
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {selectedSchedule.unassigned.map((u: any) => (
+                      <div
+                        key={u.id}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">
+                            {u.subject?.code} — {u.subject?.title}
+                          </p>
+                          <p className="text-xs text-muted-foreground truncate">
+                            {u.section?.name} &middot; {u.reason ?? "No slot available"}
+                          </p>
+                        </div>
+                        {canModifyEntries && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="shrink-0 text-xs border-amber-300 hover:border-amber-400"
+                            onClick={() => {
+                              setEntryForm((prev: any) => ({
+                                ...prev,
+                                subjectId: u.subjectId,
+                                sectionId: u.sectionId,
+                              }))
+                              setAddEntryOpen(true)
+                            }}
+                          >
+                            Manually Assign
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1580,7 +1918,7 @@ export default function SchedulesPage() {
             <div className="grid gap-2">
               <Label>School Year</Label>
               <Input
-                placeholder="e.g. 2025-2026"
+                placeholder="e.g. 2025-2026 or 2025 2026"
                 value={newSchoolYear}
                 onChange={(e) => setNewSchoolYear(e.target.value)}
               />
@@ -1714,26 +2052,128 @@ export default function SchedulesPage() {
                 <p className="text-[10px] text-muted-foreground">Lab subjects are split into two sets. Set A and Set B can overlap in time since they are different student groups.</p>
               </div>
             )}
-            {/* Faculty & Room */}
+            {/* Faculty (text autocomplete) & Room (department-restricted) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* ── Faculty — free-text with autocomplete suggestions ────────
+                  The user types a name; matching faculty appear as suggestions.
+                  Selecting one fills both the display name and the internal facultyId.
+                  If typed name doesn't match any faculty, it is saved as facultyName
+                  override so it still appears correctly in the schedule.
+              ──────────────────────────────────────────────────────────────── */}
               <div className="grid gap-2">
                 <Label>Faculty</Label>
-                <select
-                  value={entryForm.facultyId}
-                  onChange={(e) => setEntryForm((f) => ({ ...f, facultyId: e.target.value, day: "", startTime: "", endTime: "" }))}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                >
-                  <option value="">Select faculty</option>
-                  {filteredFaculty.map((f: any) => (
-                    <option key={f.id} value={f.id}>
-                      {f.user?.firstName} {f.user?.lastName}
-                    </option>
-                  ))}
-                </select>
-                {entryForm.subjectId && !entryForm.facultyId && (
-                  <p className="text-[10px] text-muted-foreground">Showing faculty with this specialization</p>
+                <div className="relative" ref={facultyComboRef}>
+                  <Input
+                    placeholder="Type faculty name..."
+                    value={
+                      facultySearch ||
+                      entryForm.facultyName ||
+                      (entryForm.facultyId
+                        ? (() => {
+                            const f = facultyList.find((f: any) => f.id === entryForm.facultyId)
+                            return f ? `${f.user?.firstName} ${f.user?.lastName}` : ""
+                          })()
+                        : "")
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value
+                      setFacultySearch(val)
+                      setFacultyDropdownOpen(true)
+                      // Clear the ID so we don't use a stale FK while typing
+                      setEntryForm((f) => ({
+                        ...f,
+                        facultyId: "",
+                        facultyName: val, // always store typed value
+                        day: "",
+                        startTime: "",
+                        endTime: "",
+                      }))
+                    }}
+                    onFocus={() => {
+                      setFacultyDropdownOpen(true)
+                      // When field is focused again, show the raw search
+                      if (entryForm.facultyId) {
+                        const f = facultyList.find((fac: any) => fac.id === entryForm.facultyId)
+                        setFacultySearch(f ? `${f.user?.firstName} ${f.user?.lastName}` : "")
+                      }
+                    }}
+                    className="w-full"
+                  />
+                  {facultyDropdownOpen && (facultySearch || !entryForm.facultyId) && (
+                    <div className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto rounded-lg border bg-popover shadow-lg">
+                      {/* Option to keep the typed text as-is (no DB match required) */}
+                      {facultySearch && (
+                        <button
+                          key="__typed"
+                          type="button"
+                          onClick={() => {
+                            setEntryForm((f) => ({ ...f, facultyId: "", facultyName: facultySearch }))
+                            setFacultySearch("")
+                            setFacultyDropdownOpen(false)
+                          }}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-accent border-b"
+                        >
+                          <span className="text-muted-foreground text-xs">Use as typed:</span>
+                          <span className="font-medium truncate">{facultySearch}</span>
+                        </button>
+                      )}
+                      {/* Filtered faculty list */}
+                      {filteredFaculty
+                        .filter((f: any) => {
+                          if (!facultySearch) return true
+                          const full = `${f.user?.firstName} ${f.user?.lastName}`.toLowerCase()
+                          return full.includes(facultySearch.toLowerCase())
+                        })
+                        .map((f: any) => {
+                          const full = `${f.user?.firstName} ${f.user?.lastName}`
+                          return (
+                            <button
+                              key={f.id}
+                              type="button"
+                              onClick={() => {
+                                setEntryForm((fv) => ({
+                                  ...fv,
+                                  facultyId: f.id,
+                                  facultyName: full,
+                                  day: "",
+                                  startTime: "",
+                                  endTime: "",
+                                }))
+                                setFacultySearch("")
+                                setFacultyDropdownOpen(false)
+                              }}
+                              className={`w-full text-left px-3 py-2 text-sm hover:bg-accent ${
+                                entryForm.facultyId === f.id ? "bg-accent font-medium" : ""
+                              }`}
+                            >
+                              <span className="font-medium">{full}</span>
+                              {f.specializations?.length > 0 && (
+                                <span className="ml-2 text-[11px] text-muted-foreground">
+                                  {f.specializations.slice(0, 2).join(", ")}
+                                </span>
+                              )}
+                            </button>
+                          )
+                        })}
+                      {filteredFaculty.filter((f: any) => {
+                        if (!facultySearch) return true
+                        const full = `${f.user?.firstName} ${f.user?.lastName}`.toLowerCase()
+                        return full.includes(facultySearch.toLowerCase())
+                      }).length === 0 && !facultySearch && (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">No faculty found</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {entryForm.facultyId && (
+                  <p className="text-[10px] text-emerald-600">✓ Linked to faculty record (availability & conflicts checked)</p>
+                )}
+                {!entryForm.facultyId && entryForm.facultyName && (
+                  <p className="text-[10px] text-amber-600">⚠ Free-text name — not linked to a faculty record</p>
                 )}
               </div>
+
+              {/* ── Room — filtered to department-assigned buildings ──────── */}
               <div className="grid gap-2">
                 <Label>Room</Label>
                 <select
@@ -1743,11 +2183,20 @@ export default function SchedulesPage() {
                 >
                   <option value="">Select room</option>
                   {filteredRooms.map((r: any) => (
-                    <option key={r.id} value={r.id}>{r.code} ({r.name}) — {r.type?.replace(/_/g, " ")}</option>
+                    <option key={r.id} value={r.id}>
+                      {r.code} ({r.name}) — {r.building?.code ?? ""} · {r.type?.replace(/_/g, " ")}
+                    </option>
                   ))}
                 </select>
+                {scheduleDeptId && departmentRooms.length > 0 && (
+                  <p className="text-[10px] text-muted-foreground">
+                    Showing {departmentRooms.length} room{departmentRooms.length !== 1 ? "s" : ""} in your department's buildings
+                  </p>
+                )}
                 {entryForm.subjectId && selectedSubjectForEntry?.requiredRoomType?.length > 0 && (
-                  <p className="text-[10px] text-muted-foreground">Filtered by subject type: {selectedSubjectForEntry.requiredRoomType.map((t: string) => t.replace(/_/g, " ")).join(", ")}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Filtered by subject type: {selectedSubjectForEntry.requiredRoomType.map((t: string) => t.replace(/_/g, " ")).join(", ")}
+                  </p>
                 )}
               </div>
             </div>
@@ -1822,74 +2271,57 @@ export default function SchedulesPage() {
 
       {/* ── Edit Entry Dialog ── */}
       <Dialog open={editEntryOpen} onOpenChange={setEditEntryOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit Schedule Entry</DialogTitle>
+        <DialogContent className="sm:max-w-xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="pb-2 border-b">
+            <DialogTitle className="text-base font-semibold tracking-tight">Edit Schedule Entry</DialogTitle>
+            <p className="text-xs text-muted-foreground mt-0.5">Update the details for this scheduled class.</p>
           </DialogHeader>
-          <div className="grid gap-4 py-4">
-            {/* Faculty & Subject — bidirectional filtering */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>Faculty</Label>
+
+          <div className="space-y-5 py-4">
+
+            {/* Row 1: Faculty | Subject */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Faculty</Label>
                 <select
                   value={editEntryForm.facultyId}
                   onChange={(e) => setEditEntryForm((f) => ({ ...f, facultyId: e.target.value, day: "", startTime: "", endTime: "" }))}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <option value="">Select faculty</option>
+                  <option value="">— Select faculty —</option>
                   {editFilteredFaculty.map((f: any) => (
-                    <option key={f.id} value={f.id}>
-                      {f.user?.firstName} {f.user?.lastName}
-                    </option>
+                    <option key={f.id} value={f.id}>{f.user?.firstName} {f.user?.lastName}</option>
                   ))}
                 </select>
                 {editEntryForm.subjectId && !editEntryForm.facultyId && (
-                  <p className="text-[10px] text-muted-foreground">Showing faculty with this specialization</p>
+                  <p className="text-[10px] text-muted-foreground">Filtered by subject specialization</p>
                 )}
               </div>
-              <div className="grid gap-2">
-                <Label>Subject</Label>
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Subject</Label>
                 <select
                   value={editEntryForm.subjectId}
                   onChange={(e) => {
                     setEditEntryForm((f) => ({ ...f, subjectId: e.target.value, sectionId: "", set: "" }))
                     setEditSectionSearch("")
                   }}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <option value="">Select subject</option>
+                  <option value="">— Select subject —</option>
                   {editFilteredSubjects.map((s: any) => (
                     <option key={s.id} value={s.id}>{s.code} — {s.title}</option>
                   ))}
                 </select>
                 {editFilteredSubjects.length === 0 && editEntryForm.facultyId && (
-                  <p className="text-[10px] text-destructive font-medium">No subjects found for this faculty&apos;s specialization. Please assign subjects in Courses / Departments first.</p>
-                )}
-                {editEntryForm.facultyId && (editSelectedFaculty?.specializations ?? []).length > 0 && editFilteredSubjects.length > 0 && (
-                  <p className="text-[10px] text-muted-foreground">Filtered by {editSelectedFaculty.user?.firstName}&apos;s specialization</p>
+                  <p className="text-[10px] text-destructive">No subjects match this faculty&apos;s specialization.</p>
                 )}
               </div>
             </div>
-            {/* Set (A/B) — only for LABORATORY subjects */}
-            {editSelectedSubject?.type === "LABORATORY" && (
-              <div className="grid gap-2">
-                <Label>Set</Label>
-                <select
-                  value={editEntryForm.set}
-                  onChange={(e) => setEditEntryForm((f) => ({ ...f, set: e.target.value as "" | "A" | "B" }))}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                >
-                  <option value="">Select set</option>
-                  <option value="A">Set A (first half — ~20 students)</option>
-                  <option value="B">Set B (second half — ~20 students)</option>
-                </select>
-                <p className="text-[10px] text-muted-foreground">Lab subjects are split into two sets. Set A and Set B can overlap in time since they are different student groups.</p>
-              </div>
-            )}
-            {/* Section & Room */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>Section</Label>
+
+            {/* Row 2: Section | Room */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Section</Label>
                 <div className="relative" ref={editSectionComboRef}>
                   <Input
                     placeholder="Search section..."
@@ -1903,14 +2335,12 @@ export default function SchedulesPage() {
                       setEditSectionDropdownOpen(true)
                       if (editEntryForm.sectionId) setEditSectionSearch("")
                     }}
-                    className="w-full"
+                    className="h-9 w-full text-sm"
                   />
                   {editSectionDropdownOpen && (
-                    <div className="absolute z-50 mt-1 w-full max-h-48 overflow-y-auto rounded-lg border bg-popover shadow-lg">
+                    <div className="absolute z-50 mt-1 w-full max-h-44 overflow-y-auto rounded-md border bg-popover shadow-md">
                       {editFilteredSections.length === 0 ? (
-                        <div className="px-3 py-2 text-sm text-destructive">
-                          No matching sections. Make sure the subject is assigned in Courses / Departments.
-                        </div>
+                        <div className="px-3 py-2 text-xs text-destructive">No matching sections found.</div>
                       ) : (
                         editFilteredSections.map((s: any) => (
                           <button
@@ -1926,10 +2356,8 @@ export default function SchedulesPage() {
                             }`}
                           >
                             {s.name}
-                            {s.yearLevel?.program?.abbreviation && (
-                              <span className="ml-1 text-xs text-muted-foreground">
-                                ({s.yearLevel.program.abbreviation} — Year {s.yearLevel?.level})
-                              </span>
+                            {s.yearLevel?.level && (
+                              <span className="ml-1.5 text-[10px] text-muted-foreground">Year {s.yearLevel.level}</span>
                             )}
                           </button>
                         ))
@@ -1937,63 +2365,79 @@ export default function SchedulesPage() {
                     </div>
                   )}
                 </div>
-                {editEntryForm.subjectId && editSelectedSubject && (
-                  <p className="text-[10px] text-muted-foreground">
-                    {editSelectedSubject.yearLevelId
-                      ? `Sections for ${editSelectedSubject.yearLevel?.program?.abbreviation ?? "program"} Year ${editSelectedSubject.year ?? editSelectedSubject.yearLevel?.level}`
-                      : editSelectedSubject.year
-                        ? `Year ${editSelectedSubject.year} sections${isSuperAdmin ? " (all programs)" : ""}`
-                        : "All sections"}
-                  </p>
+                {editEntryForm.subjectId && editSelectedSubject?.year && (
+                  <p className="text-[10px] text-muted-foreground">Year {editSelectedSubject.year} sections</p>
                 )}
               </div>
-              <div className="grid gap-2">
-                <Label>Room</Label>
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Room</Label>
                 <select
                   value={editEntryForm.roomId}
                   onChange={(e) => setEditEntryForm((f) => ({ ...f, roomId: e.target.value }))}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <option value="">Select room</option>
+                  <option value="">— Select room —</option>
                   {editFilteredRooms.map((r: any) => (
                     <option key={r.id} value={r.id}>{r.code} ({r.name}) — {r.type?.replace(/_/g, " ")}</option>
                   ))}
                 </select>
                 {editEntryForm.subjectId && editSelectedSubject?.requiredRoomType?.length > 0 && (
-                  <p className="text-[10px] text-muted-foreground">Filtered by subject type: {editSelectedSubject.requiredRoomType.map((t: string) => t.replace(/_/g, " ")).join(", ")}</p>
+                  <p className="text-[10px] text-muted-foreground">Filtered: {editSelectedSubject.requiredRoomType.map((t: string) => t.replace(/_/g, " ")).join(", ")}</p>
                 )}
               </div>
             </div>
-            {/* Day */}
-            <div className="grid gap-2">
-              <Label>Day</Label>
+
+            {/* Row 3: Set — only for LABORATORY subjects */}
+            {editSelectedSubject?.type === "LABORATORY" && (
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Laboratory Set</Label>
+                <select
+                  value={editEntryForm.set}
+                  onChange={(e) => setEditEntryForm((f) => ({ ...f, set: e.target.value as "" | "A" | "B" }))}
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                >
+                  <option value="">— Select set —</option>
+                  <option value="A">Set A — First half (~20 students)</option>
+                  <option value="B">Set B — Second half (~20 students)</option>
+                </select>
+                <p className="text-[10px] text-muted-foreground">Set A and Set B may share the same time slot as they are separate student groups.</p>
+              </div>
+            )}
+
+            {/* Divider */}
+            <div className="border-t" />
+
+            {/* Row 4: Day */}
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Day of Week</Label>
               <select
                 value={editEntryForm.day}
                 onChange={(e) => setEditEntryForm((f) => ({ ...f, day: e.target.value, startTime: "", endTime: "" }))}
-                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               >
-                <option value="">Select day</option>
+                <option value="">— Select day —</option>
                 {editAvailableDays.map((d) => (
                   <option key={d} value={d}>{d.charAt(0) + d.slice(1).toLowerCase()}</option>
                 ))}
               </select>
-              {editEntryForm.facultyId && editAvailableDays.length < DAYS.length && (
-                <p className="text-[10px] text-muted-foreground">Showing days based on faculty availability</p>
-              )}
               {editEntryForm.facultyId && editFacultyAvailability.length === 0 && (
-                <p className="text-[10px] text-amber-600">No availability set for this faculty. All days/times shown.</p>
+                <p className="text-[10px] text-amber-600">No availability configured for this faculty — all days are shown.</p>
+              )}
+              {editEntryForm.facultyId && editFacultyAvailability.length > 0 && (
+                <p className="text-[10px] text-muted-foreground">Days filtered by faculty availability</p>
               )}
             </div>
-            {/* Time */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>Start Time</Label>
+
+            {/* Row 5: Start Time | End Time */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">Start Time</Label>
                 <select
                   value={editEntryForm.startTime}
                   onChange={(e) => setEditEntryForm((f) => ({ ...f, startTime: e.target.value }))}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <option value="">Select time</option>
+                  <option value="">— Select time —</option>
                   {editAvailableTimeOptions.map((t) => (
                     <option key={t} value={t}>{t}</option>
                   ))}
@@ -2002,20 +2446,21 @@ export default function SchedulesPage() {
                   <p className="text-[10px] text-muted-foreground">Filtered by faculty availability</p>
                 )}
               </div>
-              <div className="grid gap-2">
-                <Label>End Time</Label>
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-foreground/80 uppercase tracking-wide">End Time</Label>
                 <select
                   value={editEntryForm.endTime}
                   onChange={(e) => setEditEntryForm((f) => ({ ...f, endTime: e.target.value }))}
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <option value="">Select time</option>
+                  <option value="">— Select time —</option>
                   {editAvailableTimeOptions.filter((t) => !editEntryForm.startTime || t > editEntryForm.startTime).map((t) => (
                     <option key={t} value={t}>{t}</option>
                   ))}
                 </select>
               </div>
             </div>
+
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditEntryOpen(false)}>
@@ -2027,6 +2472,45 @@ export default function SchedulesPage() {
               ) : (
                 "Save Changes"
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Conflict Override Dialog (soft-validation) ── */}
+      <Dialog
+        open={!!conflictMessage}
+        onOpenChange={() => { setConflictMessage(null); setPendingForceChanges(null); setForceEntryId(null) }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5 shrink-0" />
+              Scheduling Conflict Detected
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-muted-foreground leading-relaxed">{conflictMessage}</p>
+            <p className="text-sm font-medium">Override this constraint and save anyway?</p>
+            <p className="text-xs text-muted-foreground">
+              The conflict will be flagged in the conflict report. You can resolve it by adjusting
+              the affected entries.
+            </p>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => { setConflictMessage(null); setPendingForceChanges(null); setForceEntryId(null) }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleForceOverride}
+              disabled={updateEntry.isPending}
+            >
+              {updateEntry.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Override &amp; Save
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2047,7 +2531,9 @@ export default function SchedulesPage() {
               <div className="flex items-start gap-2">
                 <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
                 <p className="text-xs text-amber-800">
-                  This will replace all existing entries in this schedule. Make sure faculty availability and subject data are up to date before generating.
+                  {isSuperAdmin
+                    ? "This generates GEC/minor subjects assigned to your department (e.g. SS, LLH, or MNS). NSTP and PATHFIT are excluded from auto-generation. Existing entries for this schedule will be cleared first."
+                    : "This generates your program's major subjects. Make sure faculty availability and subject data are up to date. Submit after generation for Department Chair review."}
                 </p>
               </div>
             </div>
@@ -2226,6 +2712,82 @@ export default function SchedulesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {/* ── Delete Schedule Confirmation Dialog ─────────────────────────────── */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={(open) => { if (!deleteSchedule.isPending) setDeleteConfirmOpen(open) }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100">
+                <Trash2 className="h-4 w-4 text-red-600" />
+              </div>
+              Delete Schedule?
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-1">
+            {/* Schedule identity */}
+            {selectedSchedule && (
+              <div className="rounded-lg border bg-muted/40 px-4 py-3">
+                <p className="text-sm font-semibold text-foreground">
+                  {selectedSchedule.semester?.type === "FIRST"
+                    ? "1st Semester"
+                    : selectedSchedule.semester?.type === "SECOND"
+                    ? "2nd Semester"
+                    : "Summer"}{" "}
+                  {selectedSchedule.semester?.academicYear?.label}
+                </p>
+                {selectedSchedule.department && (
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {selectedSchedule.department.name ?? selectedSchedule.department.abbreviation}
+                  </p>
+                )}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {selectedSchedule.entries?.length ?? 0} entries will be permanently removed
+                </p>
+              </div>
+            )}
+
+            {/* Warning */}
+            <div className="flex items-start gap-2.5 rounded-lg bg-red-50 border border-red-200 px-3 py-2.5">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-600" />
+              <p className="text-xs text-red-700">
+                This action <strong>cannot be undone</strong>. The schedule and all its entries will be permanently deleted.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteConfirmOpen(false)}
+              disabled={deleteSchedule.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-red-600 hover:bg-red-700 text-white gap-2"
+              disabled={deleteSchedule.isPending}
+              onClick={() => {
+                if (!selectedScheduleId) return
+                deleteSchedule.mutate(selectedScheduleId, {
+                  onSuccess: () => {
+                    setDeleteConfirmOpen(false)
+                    setSelectedScheduleId(null)
+                    toast.success("Schedule deleted successfully")
+                  },
+                  onError: (err: any) => {
+                    toast.error(err.message)
+                  },
+                })
+              }}
+            >
+              {deleteSchedule.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Delete Schedule
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
     </div>
     </RoleGuard>
   )

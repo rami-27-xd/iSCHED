@@ -57,6 +57,8 @@ export async function GET(request: NextRequest) {
         isActive: true,
         createdAt: true,
         updatedAt: true,
+        clusterId: true,
+        cluster: { select: { id: true, name: true } },
         department: { select: { id: true, name: true, abbreviation: true } },
         faculty: { select: { department: { select: { id: true, name: true, abbreviation: true } } } },
         departmentChair: { select: { department: { select: { id: true, name: true, abbreviation: true } } } },
@@ -81,6 +83,8 @@ export async function GET(request: NextRequest) {
         isActive: u.isActive,
         createdAt: u.createdAt,
         updatedAt: u.updatedAt,
+        clusterId: u.clusterId,
+        cluster: u.cluster ?? null,
         department: dept,
         programHead: u.programHead ?? null,
       }

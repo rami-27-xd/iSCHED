@@ -70,7 +70,7 @@ export function Sidebar({ userRole, userName, userEmail, collapsed = false, onTo
   const filtered = getFilteredNavItems(userRole)
 
   const { data: userInfo } = useQuery({
-    queryKey: ['sidebar-user-info'],
+    queryKey: ['sidebar-user-info', userEmail],
     queryFn: async () => {
       const res = await fetch('/api/users/me')
       const json = await res.json()

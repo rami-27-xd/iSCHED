@@ -160,7 +160,7 @@ export async function POST(
     // Notify all super admins in same department
     await notifyAllSuperAdmins(
       "Schedule Published",
-      `A schedule for ${schedule.semester?.type === "FIRST" ? "1st" : "2nd"} Semester ${schedule.semester?.academicYear?.label ?? ""} has been published.`,
+      `A schedule for ${schedule.semester?.type === "FIRST" ? "1st" : schedule.semester?.type === "SECOND" ? "2nd" : "Summer"} Semester ${schedule.semester?.academicYear?.label ?? ""} has been published.`,
       "schedule_published",
       "/dashboard/schedules"
     )
@@ -180,7 +180,7 @@ export async function POST(
             data: {
               userId: program.head.userId,
               title: "Schedule Published — Ready for Review",
-              message: `The Department Chair has published the ${schedule.semester?.type === "FIRST" ? "1st" : "2nd"} Semester ${schedule.semester?.academicYear?.label ?? ""} schedule for ${schedule.department?.name ?? "your department"}. You can now view and edit it.`,
+              message: `The Department Chair has published the ${schedule.semester?.type === "FIRST" ? "1st" : schedule.semester?.type === "SECOND" ? "2nd" : "Summer"} Semester ${schedule.semester?.academicYear?.label ?? ""} schedule for ${schedule.department?.name ?? "your department"}. You can now view and edit it.`,
               type: "schedule_published",
               link: "/dashboard/schedules",
             },

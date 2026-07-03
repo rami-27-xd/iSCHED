@@ -3,6 +3,7 @@ import { getAuthenticatedUser, getCurrentUser } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 import { validateEntry } from "@/lib/services/entry-validation"
+import { syncFacultySpecializations } from "@/lib/services/sync-specializations"
 
 export async function PATCH(
   req: Request,
@@ -32,19 +33,14 @@ export async function PATCH(
       return NextResponse.json(apiError("Entry not found"), { status: 404 })
     }
 
-    // Only DRAFT schedules can be modified by Dept Chair
-    // Program Chairs can edit their own entries on PUBLISHED schedules
-    if (dbUser.role === "SUPER_ADMIN" && schedule.status === "DRAFT") {
-      // OK — full access
-    } else if (dbUser.role === "ADMIN" && schedule.status === "PUBLISHED") {
-      // Program Chair can only edit entries they personally created
-      // If createdBy is null or belongs to someone else, block it
-      if (!entry.createdBy || entry.createdBy !== dbUser.id) {
-        return NextResponse.json(
-          apiError("You can only modify entries you created. Department Chair entries are read-only."),
-          { status: 403 }
-        )
-      }
+    // Permission rules (two-phase workflow):
+    // - SUPER_ADMIN: full access on any status — they manage GEC entries (Phase 1) and
+    //   review/correct Program Chair entries (Phase 2 conflict resolution).
+    // - ADMIN: full access on their own DRAFT (Phase 2 major subjects only).
+    if (dbUser.role === "SUPER_ADMIN") {
+      // Full access regardless of status
+    } else if (dbUser.role === "ADMIN" && schedule.status === "DRAFT") {
+      // Full access on their own DRAFT
     } else {
       return NextResponse.json(apiError("You don't have permission to modify this schedule"), { status: 403 })
     }
@@ -62,7 +58,10 @@ export async function PATCH(
     }
 
     const validationError = await validateEntry(id, merged, entryId)
-    if (validationError) {
+    // force: true = soft-validation — save anyway and return warning instead of blocking
+    const force = body.force === true
+
+    if (validationError && !force) {
       return NextResponse.json(apiError(validationError), { status: 409 })
     }
 
@@ -86,7 +85,17 @@ export async function PATCH(
       },
     })
 
-    return NextResponse.json(apiResponse(updated))
+    // Sync specializations for both old and new faculty when faculty changes
+    const affectedFacultyIds = new Set<string>()
+    if (entry.facultyId) affectedFacultyIds.add(entry.facultyId)
+    if (body.facultyId && body.facultyId !== entry.facultyId) affectedFacultyIds.add(body.facultyId)
+    await Promise.all([...affectedFacultyIds].map(fid => syncFacultySpecializations(fid).catch(() => {})))
+
+    const responsePayload = apiResponse(updated)
+    if (validationError) {
+      return NextResponse.json({ ...responsePayload, warning: validationError })
+    }
+    return NextResponse.json(responsePayload)
   } catch (error) {
     console.error("PATCH /api/schedules/[id]/entries/[entryId] error:", error)
     return NextResponse.json(apiError("Internal server error"), { status: 500 })
@@ -120,23 +129,23 @@ export async function DELETE(
       return NextResponse.json(apiError("Entry not found"), { status: 404 })
     }
 
-    // Only DRAFT schedules can be modified by Dept Chair
-    // Program Chairs can delete their own entries on PUBLISHED schedules
-    if (dbUser.role === "SUPER_ADMIN" && schedule.status === "DRAFT") {
-      // OK
-    } else if (dbUser.role === "ADMIN" && schedule.status === "PUBLISHED") {
-      // Program Chair can only delete entries they personally created
-      if (!entry.createdBy || entry.createdBy !== dbUser.id) {
-        return NextResponse.json(
-          apiError("You can only delete entries you created. Department Chair entries are read-only."),
-          { status: 403 }
-        )
-      }
+    // Permission rules (two-phase workflow):
+    // - SUPER_ADMIN: full delete on any status — for GEC/PATHFIT conflict resolution.
+    // - ADMIN: delete own entries on DRAFT only.
+    if (dbUser.role === "SUPER_ADMIN") {
+      // Full access regardless of status
+    } else if (dbUser.role === "ADMIN" && schedule.status === "DRAFT") {
+      // OK — full access on their own DRAFT
     } else {
       return NextResponse.json(apiError("You don't have permission to modify this schedule"), { status: 403 })
     }
 
     await db.scheduleEntry.delete({ where: { id: entryId, scheduleId: id } })
+
+    // Re-sync the faculty's specializations now that one entry is removed
+    if (entry.facultyId) {
+      await syncFacultySpecializations(entry.facultyId).catch(() => {})
+    }
 
     return NextResponse.json(apiResponse({ deleted: true }))
   } catch (error) {

@@ -14,7 +14,7 @@ export async function PATCH(
     const { id } = await params
     const body = await request.json()
 
-    const { role, isApproved, isActive, departmentId, programId } = body
+    const { role, isApproved, isActive, departmentId, programId, clusterId } = body
 
     // Validate role if provided
     const validRoles = ['SUPER_ADMIN', 'ADMIN', 'FACULTY']
@@ -36,8 +36,9 @@ export async function PATCH(
     if (role !== undefined) updateData.role = role
     if (isApproved !== undefined) updateData.isApproved = isApproved
     if (isActive !== undefined) updateData.isActive = isActive
-    // Set departmentId directly on User for all roles
     if (departmentId !== undefined) updateData.departmentId = departmentId || null
+    // clusterId: which CAS sub-area (Faculty Cluster) this Dept Chair oversees
+    if (clusterId !== undefined) updateData.clusterId = clusterId || null
 
     const user = await db.user.update({
       where: { id },
@@ -61,12 +62,22 @@ export async function PATCH(
       const targetRole = role ?? user.role
 
       if (targetRole === 'SUPER_ADMIN') {
-        const existing = await db.departmentChair.findUnique({ where: { userId: id } })
-        if (existing) {
-          await db.departmentChair.update({ where: { userId: id }, data: { departmentId } })
-        } else {
+        // User.departmentId (set above in updateData) is the primary source for
+        // getUserDepartmentId(). DepartmentChair is a secondary index — skip creating
+        // it when another user already holds the record for this dept (e.g. multiple
+        // CAS Dept Heads sharing one CAS department).
+        const existingByUser = await db.departmentChair.findUnique({ where: { userId: id } })
+        const existingByDept = await db.departmentChair.findUnique({ where: { departmentId } })
+        if (existingByUser) {
+          // Only update the user's own record if it won't conflict with another user's
+          if (!existingByDept || existingByDept.userId === id) {
+            await db.departmentChair.update({ where: { userId: id }, data: { departmentId } })
+          }
+        } else if (!existingByDept) {
+          // No chair record for this dept yet — safe to create
           await db.departmentChair.create({ data: { userId: id, departmentId } })
         }
+        // If existingByDept belongs to a different user, skip — User.departmentId suffices
       } else if (targetRole === 'FACULTY') {
         const existing = await db.faculty.findUnique({ where: { userId: id } })
         if (existing) {

@@ -70,11 +70,6 @@ export default function DashboardPage() {
   if (isFaculty) {
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">Your schedule overview</p>
-        </div>
-
         {/* Summary cards */}
         <div className="grid gap-4 sm:grid-cols-3">
           <KPICard
@@ -194,11 +189,6 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">Overview of the scheduling system</p>
-      </div>
-
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
         {kpiData.map((kpi) => (
@@ -287,16 +277,19 @@ export default function DashboardPage() {
         </Card>
         )}
 
-        {/* Quick Actions — SUPER_ADMIN (Department Chair) */}
+        {/* Management Hub — SUPER_ADMIN (Department Chair) */}
         {userRole === "SUPER_ADMIN" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base font-semibold">
-              <CalendarDays className="h-4 w-4 text-muted-foreground" />
-              Quick Actions
+        <Card className="border-2 border-[#1B4332]/20 shadow-sm">
+          <CardHeader className="pb-3 bg-gradient-to-r from-[#1B4332]/5 to-transparent rounded-t-lg border-b">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold text-[#1B4332]">
+              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[#1B4332] text-white">
+                <Building2 className="h-3.5 w-3.5" />
+              </div>
+              Management Hub
+              <span className="ml-auto text-[10px] font-normal text-muted-foreground uppercase tracking-wider">Department Chair</span>
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <QuickActionButton
                 href="/dashboard/schedules"
@@ -339,16 +332,19 @@ export default function DashboardPage() {
         </Card>
         )}
 
-        {/* Quick Actions — ADMIN (Program Chair) */}
+        {/* Management Hub — ADMIN (Program Chair) */}
         {userRole === "ADMIN" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base font-semibold">
-              <CalendarDays className="h-4 w-4 text-muted-foreground" />
-              Quick Actions
+        <Card className="border-2 border-[#1B4332]/20 shadow-sm">
+          <CardHeader className="pb-3 bg-gradient-to-r from-[#1B4332]/5 to-transparent rounded-t-lg border-b">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold text-[#1B4332]">
+              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[#1B4332] text-white">
+                <BookOpen className="h-3.5 w-3.5" />
+              </div>
+              Management Hub
+              <span className="ml-auto text-[10px] font-normal text-muted-foreground uppercase tracking-wider">Program Chair</span>
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <QuickActionButton
                 href="/dashboard/schedules"

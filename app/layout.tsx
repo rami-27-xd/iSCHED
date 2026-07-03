@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 import { Poppins } from "next/font/google"
+import { ThemeProvider } from "next-themes"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "sonner"
 import { QueryProvider } from "@/components/providers/query-provider"
@@ -26,19 +27,21 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${poppins.variable} antialiased`}>
-        <QueryProvider>
-          <TooltipProvider>
-            {children}
-            <Toaster
-              position="top-right"
-              richColors
-              closeButton
-              toastOptions={{
-                className: "font-sans",
-              }}
-            />
-          </TooltipProvider>
-        </QueryProvider>
+        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} disableTransitionOnChange>
+          <QueryProvider>
+            <TooltipProvider>
+              {children}
+              <Toaster
+                position="top-right"
+                richColors
+                closeButton
+                toastOptions={{
+                  className: "font-sans",
+                }}
+              />
+            </TooltipProvider>
+          </QueryProvider>
+        </ThemeProvider>
       </body>
     </html>
   )

@@ -17,36 +17,51 @@ export async function GET(req: Request) {
     const semesterId = searchParams.get("semesterId")
     const status = searchParams.get("status")
     const isArchived = searchParams.get("isArchived") === "true"
+    // Cluster-scope filter: only return schedules from departments in this cluster
+    const clusterIdParam = searchParams.get("clusterId")
+    // College filter: scope to a specific college (SUPER_ADMIN college switcher)
+    const collegeIdParam = searchParams.get("collegeId")
 
     // Build where clause
+    // College filter applies only to SUPER_ADMIN (they use the topbar switcher).
+    // ADMIN gets unrestricted visibility so they can participate in the workflow.
+    const isAdmin = dbUser?.role === "ADMIN"
     const where: any = {
       isArchived,
       ...(semesterId ? { semesterId } : {}),
       ...(status ? { status: status as any } : {}),
+      ...(!isAdmin && collegeIdParam ? { department: { collegeId: collegeIdParam } } : {}),
     }
 
     if (dbUser?.role === "ADMIN") {
-      // ADMIN (Program Chair): sees PUBLISHED schedules from ANY department
-      // because the Dept Chair (e.g. CAS) adds GEC entries for sections across all departments.
-      // Entry-level filtering in GET /api/schedules/[id] scopes entries to their program.
-      where.status = "PUBLISHED"
-    } else {
-      // SUPER_ADMIN / FACULTY: scope to own department
-      if (departmentId) {
-        where.departmentId = departmentId
+      // ADMIN (Program Chair): sees all schedules including those from all colleges.
+      // They need visibility of Dept Chair schedules to know when Phase 1 is complete,
+      // and their own generated schedules are visible to all Dept Chairs for conflict review.
+      // No status or department restriction — full read access for workflow participation.
+    } else if (dbUser?.role === "SUPER_ADMIN") {
+      // SUPER_ADMIN (Dept Chair): full visibility across ALL colleges and statuses.
+      // They must be able to review every Program Chair's schedule to detect and
+      // resolve room double-bookings across different programs (compliance requirement).
+      // Optional college filter via topbar switcher; null = all colleges.
+      if (collegeIdParam) {
+        where.department = { collegeId: collegeIdParam }
       }
+    } else {
+      // FACULTY: scope to own department
+      if (departmentId) where.departmentId = departmentId
     }
 
     const schedules = await db.schedule.findMany({
       where,
       include: {
-        semester: {
-          include: { academicYear: true },
+        semester: { include: { academicYear: true } },
+        department: {
+          include: {
+            college: { select: { name: true, abbreviation: true } },
+            cluster: { select: { id: true, name: true } },
+          },
         },
-        department: true,
-        _count: {
-          select: { entries: true, conflicts: true },
-        },
+        _count: { select: { entries: true, conflicts: true } },
       },
       orderBy: { createdAt: "desc" },
     })
@@ -70,9 +85,11 @@ export async function POST(req: Request) {
       return NextResponse.json(apiError("User not found"), { status: 404 })
     }
 
-    // Only SUPER_ADMIN (Department Chair) can create schedules
-    if (dbUser.role !== "SUPER_ADMIN") {
-      return NextResponse.json(apiError("Only Department Chairs can create schedules"), { status: 403 })
+    // Both SUPER_ADMIN (Dept Chair) and ADMIN (Program Chair) can create schedules.
+    // Dept Chairs create GEC schedules (Phase 1); Program Chairs create major-subject
+    // schedules (Phase 2), which Dept Chairs can then review for room conflicts.
+    if (!["SUPER_ADMIN", "ADMIN"].includes(dbUser.role)) {
+      return NextResponse.json(apiError("Only Department Chairs and Program Chairs can create schedules"), { status: 403 })
     }
 
     const departmentId = getUserDepartmentId(dbUser)

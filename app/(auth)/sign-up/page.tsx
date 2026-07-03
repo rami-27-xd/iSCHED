@@ -7,7 +7,6 @@ import { createClient } from '@/lib/supabase/client'
 import { CalendarDays, Loader2, ShieldCheck, Lock, Users, GraduationCap, Building2, Eye, EyeOff } from 'lucide-react'
 
 const ALLOWED_ROLES: Record<string, { label: string; description: string }> = {
-  FACULTY: { label: 'Faculty', description: 'View assigned schedules and manage availability' },
   ADMIN: { label: 'Program Chair', description: 'Manage major subjects and schedules per program' },
   SUPER_ADMIN: { label: 'Department Chair', description: 'Full system access — manage all schedules, faculty, and settings' },
 }
@@ -38,7 +37,7 @@ function SignUpForm() {
   const [success, setSuccess] = useState(false)
 
   // Show department selector for ADMIN (Program Chair) and FACULTY
-  const needsDepartment = role === 'ADMIN' || role === 'FACULTY'
+  const needsDepartment = role === 'ADMIN'
 
   // Fetch departments when role needs it
   useEffect(() => {
@@ -75,7 +74,15 @@ function SignUpForm() {
 
     setLoading(true)
 
-    const supabase = createClient()
+    let supabase
+    try {
+      supabase = createClient()
+    } catch (err: any) {
+      setError(err.message)
+      setLoading(false)
+      return
+    }
+
     const { error } = await supabase.auth.signUp({
       email,
       password,
@@ -91,7 +98,17 @@ function SignUpForm() {
     })
 
     if (error) {
-      setError(error.message)
+      // Give a clear message for the most common error — duplicate email
+      if (
+        error.message.toLowerCase().includes('already registered') ||
+        error.message.toLowerCase().includes('already been registered') ||
+        error.message.toLowerCase().includes('user already exists') ||
+        error.message.toLowerCase().includes('email address is already')
+      ) {
+        setError('An account with this email already exists. Please sign in instead.')
+      } else {
+        setError(error.message)
+      }
       setLoading(false)
       return
     }
@@ -121,7 +138,12 @@ function SignUpForm() {
   if (success) {
     const deptName = departments.find((d: any) => d.id === selectedDepartmentId)?.name
     return (
-      <div className="min-h-screen bg-[#1B4332] flex items-center justify-center px-4">
+      <div className="min-h-screen bg-[#1B4332] flex items-center justify-center px-4 relative overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+          <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-white/[0.04]" />
+          <div className="absolute -bottom-24 -right-24 h-80 w-80 rounded-full bg-white/[0.04]" />
+          <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#D4AF37]/50 to-transparent" />
+        </div>
         <div className="w-full max-w-sm text-center">
           <div className="inline-flex h-14 w-14 items-center justify-center rounded-xl bg-[#D4AF37] mb-4">
             <ShieldCheck className="h-7 w-7 text-[#1B4332]" />
@@ -153,8 +175,17 @@ function SignUpForm() {
   }
 
   return (
-    <div className="min-h-screen bg-[#1B4332] flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen bg-[#1B4332] flex items-center justify-center px-4 relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+        <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-white/[0.04]" />
+        <div className="absolute -bottom-24 -right-24 h-80 w-80 rounded-full bg-white/[0.04]" />
+        <div className="absolute top-1/4 right-12 h-48 w-48 rounded-full border border-white/[0.07]" />
+        <div className="absolute bottom-1/3 left-10 h-28 w-28 rounded-full border border-white/[0.07]" />
+        <div className="absolute top-1/3 left-1/4 h-2 w-2 rounded-full bg-[#D4AF37]/50" />
+        <div className="absolute top-2/3 right-1/3 h-3 w-3 rounded-full bg-[#D4AF37]/30" />
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#D4AF37]/50 to-transparent" />
+      </div>
+      <div className="w-full max-w-sm relative z-10">
         <div className="text-center mb-8">
           <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-[#D4AF37] mb-4">
             <CalendarDays className="h-6 w-6 text-[#1B4332]" />
@@ -268,29 +299,6 @@ function SignUpForm() {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  <label
-                    className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
-                      selectedRole === 'FACULTY'
-                        ? 'border-[#1B4332] bg-[#1B4332]/5 ring-1 ring-[#1B4332]'
-                        : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="role"
-                      value="FACULTY"
-                      checked={selectedRole === 'FACULTY'}
-                      onChange={() => { setSelectedRole('FACULTY'); setSelectedDepartmentId('') }}
-                      className="mt-0.5 accent-[#1B4332]"
-                    />
-                    <div className="flex items-start gap-2">
-                      <Users className="h-4 w-4 text-[#1B4332] mt-0.5 shrink-0" />
-                      <div>
-                        <span className="text-sm font-medium text-gray-800">Faculty</span>
-                        <p className="text-xs text-gray-500">View assigned schedules and manage availability</p>
-                      </div>
-                    </div>
-                  </label>
                   <label
                     className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
                       selectedRole === 'ADMIN'

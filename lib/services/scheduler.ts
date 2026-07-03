@@ -23,6 +23,8 @@ interface SubjectInput {
   units: number
   year: number
   departmentCode?: string
+  // null = department-wide / GEC subject → matches sections from any program in the dept.
+  programId?: string | null
   // When set, only rooms whose labSpecialization matches exactly are valid (Hard Constraint).
   requiredLabSpecialization?: string | null
 }
@@ -59,6 +61,14 @@ interface SectionInput {
   id: string
   name: string
   yearLevel: number
+  // The program this section belongs to (via yearLevel.programId).
+  programId: string | null
+}
+
+interface SessionSlot {
+  day: DayOfWeek
+  startTime: string
+  endTime: string
 }
 
 interface Assignment {
@@ -69,14 +79,50 @@ interface Assignment {
   day: DayOfWeek
   startTime: string
   endTime: string
+  // Additional sessions for multi-day subjects (lectures split across days).
+  // Labs always have extraSessions = [] — they run as one continuous block.
+  extraSessions: SessionSlot[]
+  // Present only for laboratory subjects — identifies which student group this slot serves.
+  // Set A and Set B are scheduled independently so they get genuinely different time slots.
+  set?: 'A' | 'B'
+}
+
+export interface UnassignedTask {
+  subjectId: string
+  subjectCode: string
+  subjectTitle: string
+  sectionId: string
+  sectionName: string
+  reason: string
+}
+
+// Pre-existing schedule entries that must be treated as already-occupied slots.
+// Used to seed the engine when regenerating a subset of subjects (e.g. GEC only)
+// so the engine respects slots already held by major-subject entries — and when
+// checking cross-schedule room/faculty availability for concurrent departments.
+export interface LockedEntry {
+  facultyId: string
+  roomId: string
+  sectionId: string
+  set?: string | null
+  day: string
+  startTime: string
+  endTime: string
+}
+
+export interface GenerationResult {
+  assignments: Assignment[]
+  unassigned: UnassignedTask[]
 }
 
 interface SchedulingTask {
-  taskId: string // `${subjectId}__${sectionId}`
+  taskId: string // `${subjectId}__${sectionId}` for lectures, `${subjectId}__${sectionId}__A/B` for labs
   subjectId: string
   sectionId: string
   subject: SubjectInput
   section: SectionInput
+  // Present only for lab subjects — each lab becomes two independent tasks.
+  set?: 'A' | 'B'
 }
 
 export interface ScheduleConstraints {
@@ -103,15 +149,60 @@ const DEFAULT_CONSTRAINTS: ScheduleConstraints = {
   respectRoomType: true,
   enforceBuildingAvailability: true,
   enforceLabSpecialization: true,
-  maxDailyLoad: 8,
-  maxWeeklyUnits: 21,
+  maxDailyLoad: 10,
+  maxWeeklyUnits: 30,
   noBackToBackLab: true,
   preferMorningSlots: false,
 }
 
-const MAX_BACKTRACK_MS = 25_000
-const MAX_CANDIDATES_PER_TASK = 500
+const MAX_BACKTRACK_MS = 8_000
+const MAX_CANDIDATES_PER_TASK = 200
+// For greedy-only runs, early-stop candidate collection at this limit.
+// With upfront shuffling of faculty/rooms/patterns, 80 diverse candidates per task
+// gives the greedy algorithm enough flexibility without slowing enumeration.
+const MAX_CANDIDATES_GREEDY = 80
+
+function shuffleInPlace<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]]
+  }
+  return arr
+}
 const TIMEOUT_CHECK_INTERVAL = 200
+// Beyond this many tasks, backtracking provably cannot finish before the timeout.
+// Keep low so GEC/PATHFIT runs (many sections) always use fast greedy mode.
+const GREEDY_ONLY_THRESHOLD = 60
+
+// Predefined day-group patterns per total credit hours.
+// Lectures are distributed across multiple days; labs run as one continuous block.
+// Each entry: { days — the days to use in order; minutesEach — session length per day }
+const SESSION_DAY_GROUPS: Record<number, { days: DayOfWeek[]; minutesEach: number }[]> = {
+  1: [
+    { days: ['MONDAY'],    minutesEach: 60 },
+    { days: ['TUESDAY'],   minutesEach: 60 },
+    { days: ['WEDNESDAY'], minutesEach: 60 },
+    { days: ['THURSDAY'],  minutesEach: 60 },
+    { days: ['FRIDAY'],    minutesEach: 60 },
+    { days: ['SATURDAY'],  minutesEach: 60 },
+  ],
+  2: [
+    { days: ['MONDAY',   'WEDNESDAY'], minutesEach: 60 },
+    { days: ['TUESDAY',  'THURSDAY'],  minutesEach: 60 },
+    { days: ['MONDAY',   'FRIDAY'],    minutesEach: 60 },
+    { days: ['WEDNESDAY','FRIDAY'],    minutesEach: 60 },
+    { days: ['TUESDAY',  'SATURDAY'],  minutesEach: 60 },
+    { days: ['THURSDAY', 'SATURDAY'],  minutesEach: 60 },
+  ],
+  3: [
+    { days: ['MONDAY',   'WEDNESDAY', 'FRIDAY'],   minutesEach: 60 },  // MWF 1h×3
+    { days: ['TUESDAY',  'THURSDAY',  'SATURDAY'], minutesEach: 60 },  // TThS 1h×3
+    { days: ['TUESDAY',  'THURSDAY'],              minutesEach: 90 },  // TTh 1.5h×2
+    { days: ['MONDAY',   'THURSDAY'],              minutesEach: 90 },  // MTh 1.5h×2
+    { days: ['MONDAY',   'WEDNESDAY'],             minutesEach: 90 },  // MW 1.5h×2
+    { days: ['WEDNESDAY','FRIDAY'],                minutesEach: 90 },  // WF 1.5h×2
+  ],
+}
 
 export class SchedulingError extends Error {
   constructor(message: string, public details?: string[]) {
@@ -124,6 +215,8 @@ export class SchedulingEngine {
   private assignments: Assignment[] = []
   private constraints: ScheduleConstraints
   private tasks: SchedulingTask[] = []
+  // Subjects that had no matching sections at task-build time — reported as unassigned.
+  private noSectionSubjects: UnassignedTask[] = []
 
   private subjectMap: Map<string, SubjectInput>
   private facultyMap: Map<string, FacultyInput>
@@ -141,6 +234,15 @@ export class SchedulingEngine {
   private facultyWeeklyUnits: Map<string, number> = new Map()
   private facultySubjectSections: Map<string, number> = new Map()
 
+  // Lecture-lab pairing: ensures the lab and its corresponding lecture use the same faculty.
+  // lectureLabPairs: labSubjectId → lectureSubjectId
+  // lectureToLabMap: lectureSubjectId → labSubjectId (reverse lookup)
+  private lectureLabPairs: Map<string, string> = new Map()
+  private lectureToLabMap: Map<string, string> = new Map()
+  // Tracks which faculty is assigned to each (subjectId__sectionId[__set]) key.
+  // Used to enforce lecture-lab same-faculty and set-A/set-B same-faculty constraints.
+  private assignedFacultyMap: Map<string, string> = new Map()
+
   private startTime = 0
   private candidateChecks = 0
 
@@ -149,67 +251,145 @@ export class SchedulingEngine {
     private faculty: FacultyInput[],
     private rooms: RoomInput[],
     private sections: SectionInput[],
-    constraints: Partial<ScheduleConstraints> = {}
+    constraints: Partial<ScheduleConstraints> = {},
+    private lockedEntries: LockedEntry[] = []
   ) {
     this.constraints = { ...DEFAULT_CONSTRAINTS, ...constraints }
 
     this.subjectMap = new Map(subjects.map(s => [s.id, s]))
     this.facultyMap = new Map(faculty.map(f => [f.id, f]))
     this.roomMap = new Map(rooms.map(r => [r.id, r]))
+    this.buildLectureLabPairs()
 
     this.tasks = this.buildTasks()
-    this.taskCandidates = this.initializeCandidates()
+    // For large runs (GEC/PATHFIT across all sections), use a tight per-task limit so
+    // candidate enumeration is O(tasks × earlyStopLimit) instead of O(tasks × 50K+).
+    const candidateLimit = this.tasks.length > GREEDY_ONLY_THRESHOLD
+      ? MAX_CANDIDATES_GREEDY
+      : MAX_CANDIDATES_PER_TASK
+    this.taskCandidates = this.initializeCandidates(candidateLimit)
+  }
+
+  // Pre-populate slot maps with entries that must be treated as already-occupied.
+  // Called after every slot-map clear in generate() so locked slots survive resets.
+  private preloadLockedSlots(): void {
+    for (const entry of this.lockedEntries) {
+      const startMin = this.toMinutes(entry.startTime)
+      const endMin   = this.toMinutes(entry.endTime)
+      this.addSlots(this.facultySlots, entry.facultyId, entry.day, startMin, endMin)
+      this.addSlots(this.roomSlots,    entry.roomId,    entry.day, startMin, endMin)
+      // For lab sets: occupy both the per-set key and the whole-section key so lectures
+      // know that slot is taken, and other sets see the section is occupied.
+      const sectionKey = entry.set ? `${entry.sectionId}|${entry.set}` : entry.sectionId
+      this.addSlots(this.sectionSlots, sectionKey, entry.day, startMin, endMin)
+      if (entry.set) {
+        this.addSlots(this.sectionSlots, entry.sectionId, entry.day, startMin, endMin)
+      }
+      const dailyKey = `${entry.facultyId}|${entry.day}`
+      this.facultyDailyMinutes.set(
+        dailyKey,
+        (this.facultyDailyMinutes.get(dailyKey) ?? 0) + (endMin - startMin)
+      )
+    }
   }
 
   private buildTasks(): SchedulingTask[] {
     const tasks: SchedulingTask[] = []
+    const existingYearLevels = new Set(this.sections.map(s => s.yearLevel))
+
     for (const subject of this.subjects) {
-      const matchingSections = this.sections.filter(s => s.yearLevel === subject.year)
-      if (matchingSections.length === 0) continue
-      for (const section of matchingSections) {
-        tasks.push({
-          taskId: `${subject.id}__${section.id}`,
+      // Match sections by year level first, then narrow by program:
+      //   subject.programId set  → only sections in that specific program
+      //   subject.programId null → GEC/shared subject, matches all sections at that year
+      const yearMatched = this.sections.filter(s => s.yearLevel === subject.year)
+      const matchingSections = subject.programId
+        ? yearMatched.filter(s => s.programId === subject.programId)
+        : yearMatched
+
+      if (matchingSections.length === 0) {
+        const hint = existingYearLevels.size > 0
+          ? `Available year levels: ${[...existingYearLevels].sort().join(', ')}`
+          : 'No sections exist for this program at all'
+        this.noSectionSubjects.push({
           subjectId: subject.id,
-          sectionId: section.id,
-          subject,
-          section,
+          subjectCode: subject.code,
+          subjectTitle: subject.title,
+          sectionId: '',
+          sectionName: '—',
+          reason: `Subject is tagged Year ${subject.year} but no sections exist for that year. ${hint}. Fix the subject's year field or add sections.`,
         })
+        continue
+      }
+      for (const section of matchingSections) {
+        if (subject.type === 'LABORATORY') {
+          // Labs: two independent tasks so Set A and Set B get genuinely different slots.
+          for (const set of ['A', 'B'] as const) {
+            tasks.push({
+              taskId: `${subject.id}__${section.id}__${set}`,
+              subjectId: subject.id,
+              sectionId: section.id,
+              subject,
+              section,
+              set,
+            })
+          }
+        } else {
+          tasks.push({
+            taskId: `${subject.id}__${section.id}`,
+            subjectId: subject.id,
+            sectionId: section.id,
+            subject,
+            section,
+          })
+        }
       }
     }
     return tasks
   }
 
-  async generate(): Promise<Assignment[]> {
+  async generate(): Promise<GenerationResult> {
+    // Subjects with no matching sections are already in noSectionSubjects.
+    // If there are also no schedulable tasks, report everything and return early.
     if (this.tasks.length === 0) {
+      if (this.noSectionSubjects.length > 0) {
+        return { assignments: [], unassigned: this.noSectionSubjects }
+      }
       throw new SchedulingError(
         'No scheduling tasks to process',
-        ['No subjects match any sections by year level. Ensure subjects have year levels and sections exist for each year.']
+        ['No subjects are linked to sections. Ensure subjects have a year field and sections exist for each year level.']
       )
     }
 
-    const diagnostics: string[] = []
+    // Partition tasks into schedulable (have candidates) vs empty-domain (impossible)
     const emptyDomainTasks: SchedulingTask[] = []
+    const schedulableTasks: SchedulingTask[] = []
 
     for (const task of this.tasks) {
       const candidates = this.taskCandidates.get(task.taskId)
       if (!candidates || candidates.length === 0) {
         emptyDomainTasks.push(task)
-        const reasons = this.diagnoseEmptyDomain(task.subject)
-        diagnostics.push(`"${task.subject.code} → ${task.section.name}": ${reasons.join('; ')}`)
+      } else {
+        schedulableTasks.push(task)
       }
     }
 
-    if (emptyDomainTasks.length === this.tasks.length) {
-      throw new SchedulingError(
-        `Cannot schedule any classes — all ${this.tasks.length} tasks have no valid assignments`,
-        diagnostics
-      )
-    }
+    // Build unassigned list — start with subjects that had no sections at all,
+    // then add tasks whose constraint domain was empty (no valid faculty/room/time).
+    const unassigned: UnassignedTask[] = [
+      ...this.noSectionSubjects,
+      ...emptyDomainTasks.map(t => ({
+        subjectId: t.subjectId,
+        subjectCode: t.subject.code,
+        subjectTitle: t.subject.title,
+        sectionId: t.sectionId,
+        sectionName: t.section.name,
+        reason: this.diagnoseEmptyDomain(t.subject).join('; '),
+      })),
+    ]
 
-    const schedulableTasks = this.tasks.filter(t => {
-      const cands = this.taskCandidates.get(t.taskId)
-      return cands && cands.length > 0
-    })
+    if (schedulableTasks.length === 0) {
+      return { assignments: [], unassigned }
+    }
 
     const orderedTasks = this.applyMRV(schedulableTasks)
 
@@ -220,33 +400,157 @@ export class SchedulingEngine {
     this.facultyDailyMinutes.clear()
     this.facultyWeeklyUnits.clear()
     this.facultySubjectSections.clear()
+    this.assignedFacultyMap.clear()
+    this.preloadLockedSlots()
     this.candidateChecks = 0
     this.startTime = Date.now()
+    // Hard overall deadline — greedy must finish within 40 s so the route returns before
+    // the 60 s serverless timeout.
+    const deadline = this.startTime + 40_000
 
-    const success = this.backtrack(orderedTasks, 0)
+    // For large scheduling runs (GEC/PATHFIT across many sections), backtracking
+    // provably cannot finish before the timeout — skip straight to greedy.
+    const useBacktracking = schedulableTasks.length <= GREEDY_ONLY_THRESHOLD
 
-    if (!success) {
-      const failureDetails = [
-        `Attempted to schedule ${schedulableTasks.length} tasks (subject×section pairs)`,
-        `${this.faculty.length} faculty, ${this.rooms.length} rooms, ${this.sections.length} sections`,
-        `Successfully assigned ${this.assignments.length} before hitting a conflict`,
-      ]
-      if (emptyDomainTasks.length > 0) {
-        failureDetails.push(`${emptyDomainTasks.length} task(s) skipped (no eligible faculty/rooms)`)
+    if (useBacktracking) {
+      const success = this.backtrack(orderedTasks, 0)
+      if (success) {
+        return { assignments: [...this.assignments], unassigned }
       }
-      failureDetails.push(...diagnostics.slice(0, 5))
-      if (diagnostics.length > 5) {
-        failureDetails.push(`...and ${diagnostics.length - 5} more issues`)
-      }
-      failureDetails.push('Try: adding more faculty availability, checking specialization matches, or adding more rooms')
-
-      throw new SchedulingError(
-        'Unable to generate a valid schedule with current constraints',
-        failureDetails
-      )
+      // Backtracking timed out or hit a dead end — reset and fall through to greedy.
+      this.assignments = []
+      this.facultySlots.clear()
+      this.roomSlots.clear()
+      this.sectionSlots.clear()
+      this.facultyDailyMinutes.clear()
+      this.facultyWeeklyUnits.clear()
+      this.facultySubjectSections.clear()
+      this.preloadLockedSlots()
     }
 
-    return [...this.assignments]
+    const { assigned, unassigned: greedyUnassigned } = this.greedyAssign(orderedTasks, deadline)
+    unassigned.push(...greedyUnassigned)
+
+    return { assignments: assigned, unassigned }
+  }
+
+  private greedyAssign(tasks: SchedulingTask[], deadline?: number): { assigned: Assignment[], unassigned: UnassignedTask[] } {
+    const assigned: Assignment[] = []
+    const greedyUnassigned: UnassignedTask[] = []
+
+    for (let i = 0; i < tasks.length; i++) {
+      if (deadline && Date.now() > deadline) {
+        // Hard time cap reached — mark remaining tasks as unassigned
+        for (let j = i; j < tasks.length; j++) {
+          const t = tasks[j]
+          greedyUnassigned.push({
+            subjectId: t.subjectId,
+            subjectCode: t.subject.code,
+            subjectTitle: t.subject.title,
+            sectionId: t.sectionId,
+            sectionName: t.section.name,
+            reason: 'No conflict-free slot available — manual assignment required',
+          })
+        }
+        break
+      }
+
+      const task = tasks[i]
+      let candidates = this.taskCandidates.get(task.taskId) ?? []
+
+      // Pre-filter to the expected faculty when a partner (lecture/lab or Set A/B) is placed.
+      // If the filter yields results, use them so the constraint is satisfied naturally.
+      // Fall back to the full candidate list only when the expected faculty has no slots.
+      const expectedFacultyId = this.getExpectedFaculty(task)
+      if (expectedFacultyId) {
+        const filtered = candidates.filter(c => c.facultyId === expectedFacultyId)
+        if (filtered.length > 0) candidates = filtered
+      }
+
+      let placed = false
+
+      for (const candidate of candidates) {
+        if (this.isConsistentFast(candidate)) {
+          this.assign(candidate)
+          assigned.push(candidate)
+          placed = true
+          break
+        }
+      }
+
+      if (!placed) {
+        // Rescue pass: pre-computed candidates were all invalidated by earlier assignments.
+        // Search the full space dynamically (early-exit on first valid slot found).
+        placed = this.rescueTask(task)
+        if (placed) assigned.push(this.assignments[this.assignments.length - 1])
+      }
+
+      if (!placed) {
+        greedyUnassigned.push({
+          subjectId: task.subjectId,
+          subjectCode: task.subject.code,
+          subjectTitle: task.subject.title,
+          sectionId: task.sectionId,
+          sectionName: task.section.name,
+          reason: 'No conflict-free slot available — manual assignment required',
+        })
+      }
+    }
+
+    return { assigned, unassigned: greedyUnassigned }
+  }
+
+  // Dynamic fallback for tasks whose pre-computed candidates were all invalidated.
+  // Iterates faculty × rooms × patterns × starts and stops at the first valid slot.
+  private rescueTask(task: SchedulingTask): boolean {
+    const { subject, section } = task
+    const expectedFacultyId = this.getExpectedFaculty(task)
+    const allAvail = this.faculty.filter(f => f.availability.length > 0)
+    // Restrict rescue to the expected faculty when a partner is already placed.
+    // Fall back to the full pool only when the expected faculty truly has no slots.
+    const allAvailFaculty = expectedFacultyId
+      ? (allAvail.filter(f => f.id === expectedFacultyId).length > 0
+          ? allAvail.filter(f => f.id === expectedFacultyId)
+          : shuffleInPlace(allAvail))
+      : shuffleInPlace(allAvail)
+    const patterns = shuffleInPlace(this.getSessionDayGroups(subject))
+    const compatibleRooms = this.rooms.filter(r =>
+      this.checkLabSpecialization(subject.id, r.id) && this.roomTypeCompatible(r, subject)
+    )
+
+    for (const fac of allAvailFaculty) {
+      const reachableRooms = shuffleInPlace(
+        compatibleRooms.filter(r => this.checkBuildingAvailability(fac.id, r.id))
+      )
+      for (const room of reachableRooms) {
+        for (const pattern of patterns) {
+          const { days, minutesEach } = pattern
+          const commonStarts = this.getCommonAvailableTimes(fac, days, minutesEach)
+          for (const startMin of commonStarts) {
+            const candidate: Assignment = {
+              subjectId: subject.id,
+              facultyId: fac.id,
+              roomId: room.id,
+              sectionId: section.id,
+              day: days[0],
+              startTime: this.fromMinutes(startMin),
+              endTime: this.fromMinutes(startMin + minutesEach),
+              extraSessions: days.slice(1).map(d => ({
+                day: d,
+                startTime: this.fromMinutes(startMin),
+                endTime: this.fromMinutes(startMin + minutesEach),
+              })),
+              ...(task.set !== undefined ? { set: task.set } : {}),
+            }
+            if (this.isConsistentFast(candidate)) {
+              this.assign(candidate)
+              return true
+            }
+          }
+        }
+      }
+    }
+    return false
   }
 
   // ── Hard Constraint Checks ────────────────────────────────────────────────
@@ -314,64 +618,92 @@ export class SchedulingEngine {
    *   4. matchesSpecialization    — eliminates faculty without subject knowledge
    *   5. timeslot windows         — eliminates slots outside faculty availability
    */
-  private initializeCandidates(): Map<string, Assignment[]> {
+  private initializeCandidates(maxPerTask = MAX_CANDIDATES_PER_TASK): Map<string, Assignment[]> {
     const candidates = new Map<string, Assignment[]>()
-    const days: DayOfWeek[] = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY']
 
     for (const task of this.tasks) {
       const { subject, section } = task
       const possible: Assignment[] = []
 
-      const eligibleFaculty = this.faculty.filter(f =>
-        f.availability.length > 0 && this.matchesSpecialization(f, subject)
-      )
+      // All faculty with availability are eligible candidates. Specialization matching
+      // is a scheduling QUALITY preference — restricting the pool to only matched faculty
+      // causes cascade failures in greedy mode when those few faculty exhaust their slots.
+      // Specialization-matched faculty appear earlier in the shuffled set (soft priority)
+      // but unmatched faculty are always included as fallback to ensure full coverage.
+      const isGecSubject = subject.programId === null
+      const allAvailFaculty = this.faculty.filter(f => f.availability.length > 0)
+      const specMatchedFaculty = isGecSubject
+        ? allAvailFaculty
+        : allAvailFaculty.filter(f => this.matchesSpecialization(f, subject))
+      // Union: matched first (soft priority), then the rest — always the full pool.
+      const specMatchedIds = new Set(specMatchedFaculty.map(f => f.id))
+      const eligibleFaculty = [
+        ...specMatchedFaculty,
+        ...allAvailFaculty.filter(f => !specMatchedIds.has(f.id)),
+      ]
 
-      // Pre-filter rooms by lab specialization and room type — O(rooms) once per subject.
-      // This avoids re-evaluating these constraints inside the nested faculty×room loop.
       const compatibleRooms = this.rooms.filter(r =>
         this.checkLabSpecialization(subject.id, r.id) && this.roomTypeCompatible(r, subject)
       )
 
-      const sessionDuration = subject.type === 'LABORATORY' ? 180 : 60
+      // Day-group patterns: labs run as one continuous block on a single day;
+      // lectures are distributed across multiple days at the same clock time.
+      const patterns = this.getSessionDayGroups(subject)
 
-      for (const fac of eligibleFaculty) {
-        // Filter rooms further by building availability per faculty — O(compatibleRooms).
+      // Whether to stop as soon as we hit maxPerTask (greedy-only runs don't need diversity).
+      const earlyStop = maxPerTask < MAX_CANDIDATES_PER_TASK
+
+      // For greedy runs, shuffle faculty and patterns before collection so the
+      // early-stop cap yields diverse candidates across different faculty members
+      // and days — not 20 picks all from the first faculty member's Monday slots.
+      const sampledFaculty = earlyStop ? shuffleInPlace([...eligibleFaculty]) : eligibleFaculty
+      const sampledPatterns = earlyStop ? shuffleInPlace([...patterns]) : patterns
+
+      outer: for (const fac of sampledFaculty) {
         const reachableRooms = compatibleRooms.filter(r =>
           this.checkBuildingAvailability(fac.id, r.id)
         )
+        const sampledRooms = earlyStop ? shuffleInPlace([...reachableRooms]) : reachableRooms
 
-        for (const room of reachableRooms) {
-          for (const day of days) {
-            const availWindows = fac.availability.filter(a => a.day === day)
-            if (availWindows.length === 0) continue
+        for (const room of sampledRooms) {
+          for (const pattern of sampledPatterns) {
+            const { days, minutesEach } = pattern
+            // Times where faculty has coverage [t, t+minutesEach] on EVERY day in the group.
+            const commonStarts = this.getCommonAvailableTimes(fac, days, minutesEach)
 
-            for (const window of availWindows) {
-              const windowStart = this.toMinutes(window.startTime)
-              const windowEnd = this.toMinutes(window.endTime)
-
-              for (let start = windowStart; start + sessionDuration <= windowEnd; start += 30) {
-                possible.push({
-                  subjectId: subject.id,
-                  facultyId: fac.id,
-                  roomId: room.id,
-                  sectionId: section.id,
-                  day,
-                  startTime: this.fromMinutes(start),
-                  endTime: this.fromMinutes(start + sessionDuration),
-                })
-              }
+            for (const startMin of commonStarts) {
+              const endMin = startMin + minutesEach
+              possible.push({
+                subjectId: subject.id,
+                facultyId: fac.id,
+                roomId: room.id,
+                sectionId: section.id,
+                day: days[0],
+                startTime: this.fromMinutes(startMin),
+                endTime: this.fromMinutes(endMin),
+                extraSessions: days.slice(1).map(d => ({
+                  day: d,
+                  startTime: this.fromMinutes(startMin),
+                  endTime: this.fromMinutes(endMin),
+                })),
+                ...(task.set !== undefined ? { set: task.set } : {}),
+              })
+              if (earlyStop && possible.length >= maxPerTask) break outer
             }
           }
         }
       }
 
-      // Fisher-Yates shuffle before trimming to ensure diversity across faculty/rooms.
-      if (possible.length > MAX_CANDIDATES_PER_TASK) {
+      // Shuffle candidates before storing. For backtracking runs this spreads the search
+      // space; for greedy the early-stop shuffling above already provides diversity.
+      if (possible.length > 1) {
         for (let i = possible.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
           [possible[i], possible[j]] = [possible[j], possible[i]]
         }
-        possible.length = MAX_CANDIDATES_PER_TASK
+      }
+      if (!earlyStop && possible.length > maxPerTask) {
+        possible.length = maxPerTask
       }
 
       candidates.set(task.taskId, possible)
@@ -380,7 +712,114 @@ export class SchedulingEngine {
     return candidates
   }
 
+  private getSessionDayGroups(subject: SubjectInput): { days: DayOfWeek[]; minutesEach: number }[] {
+    const allDays: DayOfWeek[] = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY']
+    const h = Math.max(1, subject.hoursPerWeek ?? 1)
+
+    if (subject.type === 'LABORATORY') {
+      // Labs: single continuous block on any one day (never split)
+      const mins = Math.max(60, h * 60)
+      return allDays.map(d => ({ days: [d], minutesEach: mins }))
+    }
+
+    // Multi-day distribution patterns (preferred: spreads the teaching load)
+    const distributedPatterns = SESSION_DAY_GROUPS[Math.min(h, 3)] ?? [
+      // 4+ hours: split into 2 equal sessions
+      { days: ['MONDAY', 'THURSDAY'] as DayOfWeek[], minutesEach: Math.ceil(h / 2) * 60 },
+      { days: ['TUESDAY', 'FRIDAY']  as DayOfWeek[], minutesEach: Math.ceil(h / 2) * 60 },
+    ]
+
+    // Single-session fallback: full block on one day.
+    // Used when faculty don't have availability at the same clock-time on multiple days.
+    const totalMins = Math.max(60, h * 60)
+    const singleSessionPatterns = allDays.map(d => ({ days: [d] as DayOfWeek[], minutesEach: totalMins }))
+
+    // Return distributed first (preferred), single-session last (fallback)
+    return [...distributedPatterns, ...singleSessionPatterns]
+  }
+
+  // Returns all start-minute values where faculty has an availability window covering
+  // [t, t+minutesEach] on EVERY day in the group at the same clock time.
+  private getCommonAvailableTimes(fac: FacultyInput, days: DayOfWeek[], minutesEach: number): number[] {
+    const anchors = new Set<number>()
+    for (const w of fac.availability.filter(a => a.day === days[0])) {
+      const wStart = this.toMinutes(w.startTime)
+      const wEnd = this.toMinutes(w.endTime)
+      for (let t = wStart; t + minutesEach <= wEnd; t += 30) {
+        anchors.add(t)
+      }
+    }
+    if (days.length === 1) return [...anchors]
+    return [...anchors].filter(t =>
+      days.slice(1).every(day =>
+        fac.availability
+          .filter(a => a.day === day)
+          .some(w => this.toMinutes(w.startTime) <= t && this.toMinutes(w.endTime) >= t + minutesEach)
+      )
+    )
+  }
+
+  // Returns the faculty ID that a task MUST use to satisfy same-faculty constraints,
+  // or null if no partner has been assigned yet (no constraint applies).
+  private getExpectedFaculty(task: SchedulingTask): string | null {
+    const { subjectId, sectionId, set } = task
+    if (set === 'B') return this.assignedFacultyMap.get(`${subjectId}__${sectionId}__A`) ?? null
+    if (set === 'A') return this.assignedFacultyMap.get(`${subjectId}__${sectionId}__B`) ?? null
+    // Lecture: check if the paired lab is already placed
+    const pairedLabId = this.lectureToLabMap.get(subjectId)
+    if (pairedLabId) {
+      return this.assignedFacultyMap.get(`${pairedLabId}__${sectionId}__A`)
+        ?? this.assignedFacultyMap.get(`${pairedLabId}__${sectionId}__B`)
+        ?? null
+    }
+    // Lab with no set (safety): check if the paired lecture is already placed
+    const pairedLectureId = this.lectureLabPairs.get(subjectId)
+    if (pairedLectureId) {
+      return this.assignedFacultyMap.get(`${pairedLectureId}__${sectionId}`) ?? null
+    }
+    return null
+  }
+
   // ── Compatibility Helpers ─────────────────────────────────────────────────
+
+  /**
+   * Builds the lecture ↔ lab pairing maps used by the same-faculty constraint.
+   * Matching rules (both must satisfy the same year level):
+   *   Code: lab code = lecture code + "L" suffix (case-insensitive)
+   *   Title: lab title without " Laboratory" / " Lab" suffix equals lecture title
+   * When multiple lectures match, the one with the longest code wins (most specific).
+   */
+  private buildLectureLabPairs(): void {
+    const lectures = this.subjects.filter(s => s.type === 'LECTURE')
+    const labs     = this.subjects.filter(s => s.type === 'LABORATORY')
+
+    for (const lab of labs) {
+      const labCode  = lab.code.toLowerCase()
+      const labTitle = lab.title.toLowerCase().replace(/\s*(laboratory|lab)\s*$/i, '').trim()
+
+      let bestMatch: SubjectInput | undefined
+
+      for (const lec of lectures) {
+        if (lec.year !== lab.year) continue
+        const lecCode  = lec.code.toLowerCase()
+        const lecTitle = lec.title.toLowerCase().trim()
+
+        const codeMatch  = labCode === lecCode + 'l' || labCode.startsWith(lecCode + 'l')
+        const titleMatch = labTitle === lecTitle || labTitle.startsWith(lecTitle)
+
+        if (codeMatch || titleMatch) {
+          if (!bestMatch || lec.code.length > bestMatch.code.length) {
+            bestMatch = lec
+          }
+        }
+      }
+
+      if (bestMatch) {
+        this.lectureLabPairs.set(lab.id, bestMatch.id)
+        this.lectureToLabMap.set(bestMatch.id, lab.id)
+      }
+    }
+  }
 
   private matchesSpecialization(faculty: FacultyInput, subject: SubjectInput): boolean {
     if (faculty.specializations.length === 0) return true
@@ -401,47 +840,71 @@ export class SchedulingEngine {
 
   private diagnoseEmptyDomain(subject: SubjectInput): string[] {
     const reasons: string[] = []
+    // For diagnostic messaging: use the shortest session this subject generates
+    // (e.g. a 3h lecture can be split 1h×3 or 1.5h×2, so minimum is 60 min)
+    const patterns = this.getSessionDayGroups(subject)
+    const sessionMinutes = patterns.reduce((min, p) => Math.min(min, p.minutesEach), Infinity)
 
     const facultyWithAvailability = this.faculty.filter(f => f.availability.length > 0)
     if (facultyWithAvailability.length === 0) {
-      reasons.push('No faculty have availability configured for this semester')
+      reasons.push(
+        `No faculty have availability set for this semester — go to Faculty Availability and add time slots for at least one faculty member`
+      )
       return reasons
     }
 
-    const eligibleBySpec = facultyWithAvailability.filter(f =>
-      this.matchesSpecialization(f, subject)
-    )
-    if (eligibleBySpec.length === 0) {
-      reasons.push(`No faculty specializations match "${subject.title}"`)
-    }
-
+    // Room checks first — these are data-config issues independent of faculty
     const typeCompatible = this.rooms.filter(r => this.roomTypeCompatible(r, subject))
     if (typeCompatible.length === 0) {
-      const reqTypes = subject.requiredRoomType.length > 0 ? subject.requiredRoomType.join(', ') : 'any'
-      reasons.push(`No rooms match required type (needs: ${reqTypes})`)
+      const needed = subject.requiredRoomType.length > 0
+        ? subject.requiredRoomType.join(' or ')
+        : 'LECTURE_ROOM'
+      reasons.push(
+        `No active rooms of type "${needed}" exist — add a room of that type in Buildings & Rooms`
+      )
     } else if (subject.requiredLabSpecialization) {
       const specCompatible = typeCompatible.filter(r =>
         r.labSpecialization === subject.requiredLabSpecialization
       )
       if (specCompatible.length === 0) {
-        reasons.push(`No rooms with lab specialization "${subject.requiredLabSpecialization}"`)
+        reasons.push(
+          `No lab with specialization "${subject.requiredLabSpecialization}" exists — add or configure a room with that specialization`
+        )
       }
     }
 
-    if (eligibleBySpec.length > 0) {
-      const reachableRooms = this.rooms.filter(r =>
-        this.checkLabSpecialization(subject.id, r.id) && this.roomTypeCompatible(r, subject)
-      )
-      const anyReachable = eligibleBySpec.some(f =>
+    // Faculty → building → room reachability
+    const reachableRooms = this.rooms.filter(r =>
+      this.checkLabSpecialization(subject.id, r.id) && this.roomTypeCompatible(r, subject)
+    )
+    if (reachableRooms.length > 0) {
+      const anyReachable = facultyWithAvailability.some(f =>
         reachableRooms.some(r => this.checkBuildingAvailability(f.id, r.id))
       )
-      if (!anyReachable && reachableRooms.length > 0) {
-        reasons.push('No eligible faculty have building availability that overlaps compatible rooms')
+      if (!anyReachable) {
+        reasons.push(
+          `No faculty have building availability that covers a room suitable for "${subject.code}" — set building availability for faculty in the Faculty Availability page`
+        )
       }
+    }
+
+    // Availability window length check
+    const windowTooShort = facultyWithAvailability.every(f =>
+      f.availability.every(a => {
+        const windowMin = this.toMinutes(a.endTime) - this.toMinutes(a.startTime)
+        return windowMin < sessionMinutes
+      })
+    )
+    if (windowTooShort && reasons.length === 0) {
+      reasons.push(
+        `All faculty availability windows are shorter than the ${sessionMinutes / 60}h session this subject requires — extend at least one faculty member's availability window`
+      )
     }
 
     if (reasons.length === 0) {
-      reasons.push('Faculty availability windows may be too short for session duration')
+      reasons.push(
+        `No conflict-free combination of faculty, room, and time slot could be found for "${subject.code}" — check that faculty are active, have availability set, and rooms of the right type exist`
+      )
     }
 
     return reasons
@@ -520,41 +983,51 @@ export class SchedulingEngine {
    * The expensive O(n) checks (overlap scans) were replaced by slot maps.
    */
   private isConsistentFast(candidate: Assignment): boolean {
-    const startMin = this.toMinutes(candidate.startTime)
-    const endMin = this.toMinutes(candidate.endTime)
-
-    // Hard Constraint 1 — Building Availability (safety net re-check)
+    // Hard constraints — safety-net re-checks (already applied at candidate generation time)
     if (!this.checkBuildingAvailability(candidate.facultyId, candidate.roomId)) return false
-
-    // Hard Constraint 2 — Lab Specialization (safety net re-check)
     if (!this.checkLabSpecialization(candidate.subjectId, candidate.roomId)) return false
 
-    // Slot-based overlap checks
-    if (this.constraints.noFacultyOverlap &&
-        this.hasSlotConflict(this.facultySlots, candidate.facultyId, candidate.day, startMin, endMin)) {
-      return false
-    }
-    if (this.constraints.noRoomOverlap &&
-        this.hasSlotConflict(this.roomSlots, candidate.roomId, candidate.day, startMin, endMin)) {
-      return false
-    }
-    if (this.constraints.noSectionOverlap &&
-        this.hasSlotConflict(this.sectionSlots, candidate.sectionId, candidate.day, startMin, endMin)) {
-      return false
+    // Collect all sessions (primary + extra) for unified overlap and load checks
+    const allSessions = [
+      { day: candidate.day, start: this.toMinutes(candidate.startTime), end: this.toMinutes(candidate.endTime) },
+      ...candidate.extraSessions.map(s => ({
+        day: s.day, start: this.toMinutes(s.startTime), end: this.toMinutes(s.endTime),
+      })),
+    ]
+
+    for (const session of allSessions) {
+      if (this.constraints.noFacultyOverlap &&
+          this.hasSlotConflict(this.facultySlots, candidate.facultyId, session.day, session.start, session.end)) {
+        return false
+      }
+      if (this.constraints.noRoomOverlap &&
+          this.hasSlotConflict(this.roomSlots, candidate.roomId, session.day, session.start, session.end)) {
+        return false
+      }
+      if (this.constraints.noSectionOverlap) {
+        if (candidate.set) {
+          // Lab set: check per-set key (A/B don't block each other) + whole-section key (lectures block labs)
+          if (this.hasSlotConflict(this.sectionSlots, `${candidate.sectionId}|${candidate.set}`, session.day, session.start, session.end)) return false
+          if (this.hasSlotConflict(this.sectionSlots, candidate.sectionId, session.day, session.start, session.end)) return false
+        } else {
+          // Lecture: blocks the whole section — check whole-section key AND both lab-set keys
+          if (this.hasSlotConflict(this.sectionSlots, candidate.sectionId, session.day, session.start, session.end)) return false
+          if (this.hasSlotConflict(this.sectionSlots, `${candidate.sectionId}|A`, session.day, session.start, session.end)) return false
+          if (this.hasSlotConflict(this.sectionSlots, `${candidate.sectionId}|B`, session.day, session.start, session.end)) return false
+        }
+      }
+      // Daily load check per session day
+      const dailyKey = `${candidate.facultyId}|${session.day}`
+      const currentDailyMin = this.facultyDailyMinutes.get(dailyKey) ?? 0
+      if ((currentDailyMin + (session.end - session.start)) / 60 > this.constraints.maxDailyLoad) return false
     }
 
-    // Daily load check
-    const dailyKey = `${candidate.facultyId}|${candidate.day}`
-    const currentDailyMin = this.facultyDailyMinutes.get(dailyKey) ?? 0
-    if ((currentDailyMin + (endMin - startMin)) / 60 > this.constraints.maxDailyLoad) return false
-
-    // Weekly units check
+    // Weekly units and section limits are per-assignment (checked once, not per session)
     const subject = this.subjectMap.get(candidate.subjectId)
     if (subject) {
       const currentUnits = this.facultyWeeklyUnits.get(candidate.facultyId) ?? 0
       if (currentUnits + subject.units > this.constraints.maxWeeklyUnits) return false
 
-      // Per-subject section limit
       const fac = this.facultyMap.get(candidate.facultyId)
       if (fac?.sectionCounts && Object.keys(fac.sectionCounts).length > 0) {
         const maxSec = fac.sectionCounts[subject.title]
@@ -565,8 +1038,15 @@ export class SchedulingEngine {
       }
 
       if (this.constraints.noBackToBackLab && subject.type === 'LABORATORY') {
-        if (this.hasBackToBackLabFast(candidate, startMin, endMin)) return false
+        const s0 = allSessions[0]
+        if (this.hasBackToBackLabFast(candidate, s0.start, s0.end)) return false
       }
+
+      // Same-faculty preference: enforced as a soft constraint via pre-filtering in
+      // greedyAssign/rescueTask (see getExpectedFaculty). Not a hard block here because
+      // when the lecture faculty has no remaining lab slots the lab would become unassigned.
+      // The pre-filter already tries the matched faculty first; if that fails the full
+      // faculty pool is used as a fallback.
     }
 
     return true
@@ -582,6 +1062,8 @@ export class SchedulingEngine {
       const otherSubject = this.subjectMap.get(a.subjectId)
       if (!otherSubject || otherSubject.type !== 'LABORATORY') return false
       if (a.facultyId !== candidate.facultyId && a.sectionId !== candidate.sectionId) return false
+      // Different lab sets (A vs B) are independent student groups — back-to-back is allowed.
+      if (a.sectionId === candidate.sectionId && a.set !== candidate.set) return false
       const aStart = this.toMinutes(a.startTime)
       const aEnd = this.toMinutes(a.endTime)
       return aEnd === candidateStart || candidateEnd === aStart
@@ -590,49 +1072,63 @@ export class SchedulingEngine {
 
   private assign(a: Assignment): void {
     this.assignments.push(a)
-    const startMin = this.toMinutes(a.startTime)
-    const endMin = this.toMinutes(a.endTime)
-
-    this.addSlots(this.facultySlots, a.facultyId, a.day, startMin, endMin)
-    this.addSlots(this.roomSlots, a.roomId, a.day, startMin, endMin)
-    this.addSlots(this.sectionSlots, a.sectionId, a.day, startMin, endMin)
-
-    const dailyKey = `${a.facultyId}|${a.day}`
-    this.facultyDailyMinutes.set(dailyKey, (this.facultyDailyMinutes.get(dailyKey) ?? 0) + (endMin - startMin))
-
+    const allSessions = [
+      { day: a.day, start: this.toMinutes(a.startTime), end: this.toMinutes(a.endTime) },
+      ...a.extraSessions.map(s => ({ day: s.day, start: this.toMinutes(s.startTime), end: this.toMinutes(s.endTime) })),
+    ]
+    const sectionKey = a.set ? `${a.sectionId}|${a.set}` : a.sectionId
+    for (const session of allSessions) {
+      this.addSlots(this.facultySlots, a.facultyId, session.day, session.start, session.end)
+      this.addSlots(this.roomSlots, a.roomId, session.day, session.start, session.end)
+      this.addSlots(this.sectionSlots, sectionKey, session.day, session.start, session.end)
+      const dailyKey = `${a.facultyId}|${session.day}`
+      this.facultyDailyMinutes.set(dailyKey, (this.facultyDailyMinutes.get(dailyKey) ?? 0) + (session.end - session.start))
+    }
+    // Units and section counts are per-assignment, not per-session
     const subject = this.subjectMap.get(a.subjectId)
     if (subject) {
       this.facultyWeeklyUnits.set(a.facultyId, (this.facultyWeeklyUnits.get(a.facultyId) ?? 0) + subject.units)
       const fsKey = `${a.facultyId}|${subject.title}`
       this.facultySubjectSections.set(fsKey, (this.facultySubjectSections.get(fsKey) ?? 0) + 1)
     }
+    // Track faculty per (subject, section, set?) for lecture-lab pairing constraint
+    const pairKey = a.set
+      ? `${a.subjectId}__${a.sectionId}__${a.set}`
+      : `${a.subjectId}__${a.sectionId}`
+    this.assignedFacultyMap.set(pairKey, a.facultyId)
   }
 
   private unassign(a: Assignment): void {
     this.assignments.pop()
-    const startMin = this.toMinutes(a.startTime)
-    const endMin = this.toMinutes(a.endTime)
-
-    this.removeSlots(this.facultySlots, a.facultyId, a.day, startMin, endMin)
-    this.removeSlots(this.roomSlots, a.roomId, a.day, startMin, endMin)
-    this.removeSlots(this.sectionSlots, a.sectionId, a.day, startMin, endMin)
-
-    const dailyKey = `${a.facultyId}|${a.day}`
-    const newDaily = (this.facultyDailyMinutes.get(dailyKey) ?? 0) - (endMin - startMin)
-    if (newDaily <= 0) this.facultyDailyMinutes.delete(dailyKey)
-    else this.facultyDailyMinutes.set(dailyKey, newDaily)
-
+    const allSessions = [
+      { day: a.day, start: this.toMinutes(a.startTime), end: this.toMinutes(a.endTime) },
+      ...a.extraSessions.map(s => ({ day: s.day, start: this.toMinutes(s.startTime), end: this.toMinutes(s.endTime) })),
+    ]
+    const sectionKey = a.set ? `${a.sectionId}|${a.set}` : a.sectionId
+    for (const session of allSessions) {
+      this.removeSlots(this.facultySlots, a.facultyId, session.day, session.start, session.end)
+      this.removeSlots(this.roomSlots, a.roomId, session.day, session.start, session.end)
+      this.removeSlots(this.sectionSlots, sectionKey, session.day, session.start, session.end)
+      const dailyKey = `${a.facultyId}|${session.day}`
+      const newDaily = (this.facultyDailyMinutes.get(dailyKey) ?? 0) - (session.end - session.start)
+      if (newDaily <= 0) this.facultyDailyMinutes.delete(dailyKey)
+      else this.facultyDailyMinutes.set(dailyKey, newDaily)
+    }
     const subject = this.subjectMap.get(a.subjectId)
     if (subject) {
       const newUnits = (this.facultyWeeklyUnits.get(a.facultyId) ?? 0) - subject.units
       if (newUnits <= 0) this.facultyWeeklyUnits.delete(a.facultyId)
       else this.facultyWeeklyUnits.set(a.facultyId, newUnits)
-
       const fsKey = `${a.facultyId}|${subject.title}`
       const prevSec = this.facultySubjectSections.get(fsKey) ?? 0
       if (prevSec <= 1) this.facultySubjectSections.delete(fsKey)
       else this.facultySubjectSections.set(fsKey, prevSec - 1)
     }
+    // Un-track faculty assignment for lecture-lab pairing constraint
+    const pairKey = a.set
+      ? `${a.subjectId}__${a.sectionId}__${a.set}`
+      : `${a.subjectId}__${a.sectionId}`
+    this.assignedFacultyMap.delete(pairKey)
   }
 
   // ── Heuristics ────────────────────────────────────────────────────────────
@@ -641,10 +1137,22 @@ export class SchedulingEngine {
     return [...tasks].sort((a, b) => {
       const domainA = this.taskCandidates.get(a.taskId)?.length ?? 0
       const domainB = this.taskCandidates.get(b.taskId)?.length ?? 0
+      // Fewer candidates → harder to place → schedule first (classic MRV).
       if (domainA !== domainB) return domainA - domainB
-      // Labs first — they have tighter constraints (specialization + building)
-      if (a.subject.type === 'LABORATORY' && b.subject.type !== 'LABORATORY') return -1
-      if (b.subject.type === 'LABORATORY' && a.subject.type !== 'LABORATORY') return 1
+
+      // Equal domain size: within the same section, keep lecture-lab-set groups ordered
+      // (lecture → Set A → Set B) so the anchor task sets the faculty first and the
+      // constraint propagates naturally to its partners.
+      if (a.sectionId === b.sectionId) {
+        if (this.lectureToLabMap.get(a.subjectId) === b.subjectId) return -1
+        if (this.lectureToLabMap.get(b.subjectId) === a.subjectId) return 1
+        if (a.subjectId === b.subjectId) {
+          if (a.set === 'A' && b.set === 'B') return -1
+          if (a.set === 'B' && b.set === 'A') return 1
+        }
+      }
+
+      // Higher-unit tasks are harder to fit; schedule them before lower-unit tasks.
       return b.subject.units - a.subject.units
     })
   }

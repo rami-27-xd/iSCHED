@@ -29,7 +29,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
     const { id } = await params
     const body = await req.json()
-    const { name, code, buildingId, type, capacity, equipment, isActive } = body
+    const { name, code, buildingId, type, capacity, equipment, isActive, restrictedDepartmentIds } = body
 
     const room = await db.room.update({
       where: { id },
@@ -41,8 +41,16 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         ...(capacity !== undefined ? { capacity: Number(capacity) } : {}),
         ...(equipment !== undefined ? { equipment } : {}),
         ...(isActive !== undefined ? { isActive } : {}),
+        ...(restrictedDepartmentIds !== undefined
+          ? {
+              departments: {
+                deleteMany: {},
+                create: (restrictedDepartmentIds as string[]).map((departmentId) => ({ departmentId })),
+              },
+            }
+          : {}),
       },
-      include: { building: true },
+      include: { building: true, departments: { include: { department: true } } },
     })
 
     return NextResponse.json(apiResponse(room))

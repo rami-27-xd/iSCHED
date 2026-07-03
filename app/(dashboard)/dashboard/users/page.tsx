@@ -57,6 +57,8 @@ interface User {
   isActive: boolean
   createdAt: string
   updatedAt: string
+  clusterId?: string | null
+  cluster?: { id: string; name: string } | null
   department?: Department | null
   programHead?: { programId: string; program: { id: string; name: string; abbreviation?: string } } | null
 }
@@ -78,7 +80,14 @@ export default function UsersPage() {
   const [deptUser, setDeptUser] = useState<User | null>(null)
   const [deptId, setDeptId] = useState("")
   const [programId, setProgramId] = useState("")
+  const [clusterId, setClusterId] = useState("")
   const { data: departments = [] } = useDepartments()
+
+  // For the Change Department dialog: detect if selected dept is in CAS
+  // so we can show the Department Head area (cluster) dropdown.
+  const selectedDeptData = (departments as any[]).find((d: any) => d.id === deptId)
+  const isCasDeptSelected = selectedDeptData?.college?.abbreviation === "CAS"
+  const casCollegeId = isCasDeptSelected ? selectedDeptData?.college?.id : null
 
   // Fetch current user role
   const { data: currentUser } = useQuery({
@@ -104,6 +113,17 @@ export default function UsersPage() {
       return json.data ?? []
     },
     enabled: !!deptId && deptUser?.role === "ADMIN",
+  })
+
+  // Fetch CAS clusters when the selected dept is CAS and user is a Dept Chair
+  const { data: casClusters = [] } = useQuery<any[]>({
+    queryKey: ["clusters", casCollegeId],
+    queryFn: async () => {
+      const res = await fetch(`/api/clusters?collegeId=${casCollegeId}`)
+      const json = await res.json()
+      return json.data ?? []
+    },
+    enabled: !!casCollegeId && deptUser?.role === "SUPER_ADMIN",
   })
 
   // Fetch users
@@ -151,13 +171,17 @@ export default function UsersPage() {
     onError: (err: Error) => toast.error(err.message),
   })
 
-  // Change department mutation (also sends programId for ADMIN users)
+  // Change department mutation (also sends programId for ADMIN, clusterId for SUPER_ADMIN in CAS)
   const deptMutation = useMutation({
-    mutationFn: async ({ id, departmentId, programId: pId }: { id: string; departmentId: string; programId?: string }) => {
+    mutationFn: async ({ id, departmentId, programId: pId, clusterId: cId }: { id: string; departmentId: string; programId?: string; clusterId?: string }) => {
       return safeFetch(`/api/users/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ departmentId, ...(pId !== undefined ? { programId: pId } : {}) }),
+        body: JSON.stringify({
+          departmentId,
+          ...(pId !== undefined ? { programId: pId } : {}),
+          ...(cId !== undefined ? { clusterId: cId } : {}),
+        }),
       })
     },
     onSuccess: () => {
@@ -190,14 +214,6 @@ export default function UsersPage() {
   return (
     <RoleGuard allowedRoles={["SUPER_ADMIN", "ADMIN"]}>
     <div className="space-y-6">
-      <PageHeader
-        title="User Management"
-        description={isAdmin
-          ? "View faculty and staff in your department"
-          : "Approve accounts, manage roles, and control access"
-        }
-      />
-
       {/* Pending Approvals Banner — SUPER_ADMIN only */}
       {isSuperAdmin && pendingCount > 0 && approvedFilter !== "false" && (
         <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
@@ -294,6 +310,7 @@ export default function UsersPage() {
                       {u.department && (
                         <p className="text-[10px] text-muted-foreground mt-1">
                           {u.department.abbreviation ?? u.department.name}
+                          {u.role === "SUPER_ADMIN" && u.cluster && ` · ${u.cluster.name}`}
                           {u.role === "ADMIN" && u.programHead?.program && ` · ${u.programHead.program.abbreviation ?? u.programHead.program.name}`}
                         </p>
                       )}
@@ -316,7 +333,7 @@ export default function UsersPage() {
                           <DropdownMenuItem onClick={() => { setEditUser(u); setEditRole(u.role) }}>
                             <UserCog className="mr-2 h-4 w-4" />Change Role
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => { setDeptUser(u); setDeptId(u.department?.id ?? ""); setProgramId(u.programHead?.programId ?? "") }}>
+                          <DropdownMenuItem onClick={() => { setDeptUser(u); setDeptId(u.department?.id ?? ""); setProgramId(u.programHead?.programId ?? ""); setClusterId(u.clusterId ?? "") }}>
                             <Building2 className="mr-2 h-4 w-4" />Change Department
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
@@ -372,6 +389,9 @@ export default function UsersPage() {
                           <span className="text-sm">
                             {u.department.abbreviation ?? u.department.name}
                           </span>
+                          {u.role === "SUPER_ADMIN" && u.cluster && (
+                            <p className="text-xs text-muted-foreground">{u.cluster.name}</p>
+                          )}
                           {u.role === "ADMIN" && u.programHead?.program && (
                             <p className="text-xs text-muted-foreground">
                               {u.programHead.program.abbreviation ?? u.programHead.program.name}
@@ -447,6 +467,7 @@ export default function UsersPage() {
                               setDeptUser(u)
                               setDeptId(u.department?.id ?? "")
                               setProgramId(u.programHead?.programId ?? "")
+                              setClusterId(u.clusterId ?? "")
                             }}
                           >
                             <Building2 className="mr-2 h-4 w-4" />
@@ -548,7 +569,7 @@ export default function UsersPage() {
                 <Label>Department</Label>
                 <select
                   value={deptId}
-                  onChange={(e) => { setDeptId(e.target.value); setProgramId("") }}
+                  onChange={(e) => { setDeptId(e.target.value); setProgramId(""); setClusterId("") }}
                   className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   <option value="">Not assigned</option>
@@ -557,6 +578,26 @@ export default function UsersPage() {
                   ))}
                 </select>
               </div>
+
+              {/* Department Head area — only for SUPER_ADMIN assigned to CAS */}
+              {deptUser.role === "SUPER_ADMIN" && isCasDeptSelected && (
+                <div className="space-y-2">
+                  <Label>Department Head Area</Label>
+                  <select
+                    value={clusterId}
+                    onChange={(e) => setClusterId(e.target.value)}
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="">— Select area —</option>
+                    {(casClusters as any[]).map((c: any) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                  {casClusters.length === 0 && (
+                    <p className="text-xs text-muted-foreground">No areas configured for CAS yet.</p>
+                  )}
+                </div>
+              )}
 
               {/* Program selector — only for ADMIN (Program Chair) */}
               {deptUser.role === "ADMIN" && deptId && (
@@ -589,8 +630,13 @@ export default function UsersPage() {
                 id: deptUser.id,
                 departmentId: deptId,
                 ...(deptUser.role === "ADMIN" ? { programId: programId || "" } : {}),
+                ...(deptUser.role === "SUPER_ADMIN" ? { clusterId: clusterId || "" } : {}),
               })}
-              disabled={deptMutation.isPending || (deptId === (deptUser?.department?.id ?? "") && programId === (deptUser?.programHead?.programId ?? ""))}
+              disabled={deptMutation.isPending || (
+                deptId === (deptUser?.department?.id ?? "") &&
+                programId === (deptUser?.programHead?.programId ?? "") &&
+                clusterId === (deptUser?.clusterId ?? "")
+              )}
             >
               {deptMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save

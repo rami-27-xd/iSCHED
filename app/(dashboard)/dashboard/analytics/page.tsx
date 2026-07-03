@@ -1,5 +1,7 @@
 "use client"
 
+import { useMemo, useState } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/shared/page-header"
 import { KPICard } from "@/components/shared/kpi-card"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -11,14 +13,13 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
-  BarChart3,
   DoorOpen,
   Users,
   CalendarDays,
   AlertTriangle,
   TrendingUp,
-  Clock,
   BookOpen,
+  Loader2,
 } from "lucide-react"
 import {
   BarChart,
@@ -36,269 +37,447 @@ import {
   Legend,
 } from "recharts"
 
-const roomUtilization = [
-  { room: "CCS-101", utilization: 85 },
-  { room: "LAB-201", utilization: 92 },
-  { room: "CCS-102", utilization: 60 },
-  { room: "LAB-301", utilization: 45 },
-  { room: "COED-201", utilization: 72 },
-  { room: "CCS-103", utilization: 55 },
-  { room: "LAB-202", utilization: 88 },
-]
+// Total schedulable hours per week per room: 7:30 AM – 9:00 PM × 6 days = 81 h
+const TOTAL_WEEKLY_ROOM_HOURS = 81
 
-const facultyLoad = [
-  { name: "Dr. Santos", current: 18, max: 21 },
-  { name: "Prof. Dela Cruz", current: 21, max: 21 },
-  { name: "Dr. Reyes", current: 15, max: 18 },
-  { name: "Prof. Garcia", current: 12, max: 21 },
-  { name: "Dr. Lim", current: 18, max: 21 },
-  { name: "Prof. Cruz", current: 9, max: 21 },
-]
+function toMins(t: string) {
+  const [h, m] = t.split(":").map(Number)
+  return h * 60 + m
+}
 
-const subjectDistribution = [
-  { name: "Lecture", value: 45, color: "#1B4332" },
-  { name: "Laboratory", value: 30, color: "#2D6A4F" },
-  { name: "Hybrid", value: 15, color: "#40916C" },
-]
+function getDurationHours(startTime: string, endTime: string) {
+  return (toMins(endTime) - toMins(startTime)) / 60
+}
 
-const weeklyTrend = [
-  { day: "Mon", classes: 24, conflicts: 1 },
-  { day: "Tue", classes: 22, conflicts: 0 },
-  { day: "Wed", classes: 20, conflicts: 2 },
-  { day: "Thu", classes: 23, conflicts: 0 },
-  { day: "Fri", classes: 18, conflicts: 1 },
-]
+const DAY_ORDER = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]
+const DAY_SHORT: Record<string, string> = {
+  MONDAY: "Mon",
+  TUESDAY: "Tue",
+  WEDNESDAY: "Wed",
+  THURSDAY: "Thu",
+  FRIDAY: "Fri",
+  SATURDAY: "Sat",
+}
 
 export default function AnalyticsPage() {
+  const [selectedScheduleId, setSelectedScheduleId] = useState("")
+
+  // Fetch all active schedules for the selector
+  const { data: schedules = [], isLoading: loadingSchedules } = useQuery<any[]>({
+    queryKey: ["schedules", { isArchived: false }],
+    queryFn: async () => {
+      const res = await fetch("/api/schedules")
+      const json = await res.json()
+      if (!res.ok) return []
+      return json.data ?? []
+    },
+  })
+
+  // Fetch full schedule detail (with entries) for analytics
+  const { data: scheduleDetail, isLoading: loadingDetail } = useQuery({
+    queryKey: ["schedule-analytics-detail", selectedScheduleId],
+    queryFn: async () => {
+      const res = await fetch(`/api/schedules/${selectedScheduleId}`)
+      const json = await res.json()
+      if (!res.ok) return null
+      return json.data ?? null
+    },
+    enabled: !!selectedScheduleId,
+  })
+
+  const entries: any[] = scheduleDetail?.entries ?? []
+
+  // ── Room utilization ───────────────────────────────────────────────────
+  const roomUtilization = useMemo(() => {
+    const map = new Map<string, { code: string; hours: number }>()
+    for (const e of entries) {
+      const rid = e.roomId ?? e.room?.id ?? ""
+      if (!rid) continue
+      const code = e.room?.code ?? rid
+      if (!map.has(rid)) map.set(rid, { code, hours: 0 })
+      map.get(rid)!.hours += getDurationHours(e.startTime, e.endTime)
+    }
+    return Array.from(map.values())
+      .map(({ code, hours }) => ({
+        room: code,
+        utilization: Math.min(Math.round((hours / TOTAL_WEEKLY_ROOM_HOURS) * 100), 100),
+      }))
+      .sort((a, b) => b.utilization - a.utilization)
+      .slice(0, 8)
+  }, [entries])
+
+  // ── Faculty teaching load (hours / week) ──────────────────────────────
+  const facultyLoad = useMemo(() => {
+    const map = new Map<string, { name: string; hours: number }>()
+    for (const e of entries) {
+      const fid = e.facultyId ?? e.faculty?.id ?? ""
+      if (!fid) continue
+      const first = e.faculty?.user?.firstName ?? ""
+      const last = e.faculty?.user?.lastName ?? ""
+      const name = `${first} ${last}`.trim() || "Unknown"
+      if (!map.has(fid)) map.set(fid, { name, hours: 0 })
+      map.get(fid)!.hours += getDurationHours(e.startTime, e.endTime)
+    }
+    return Array.from(map.values())
+      .map(({ name, hours }) => ({
+        name,
+        current: Math.round(hours * 10) / 10,
+        max: 21,
+      }))
+      .sort((a, b) => b.current - a.current)
+      .slice(0, 8)
+  }, [entries])
+
+  // ── Subject type distribution ─────────────────────────────────────────
+  const subjectDistribution = useMemo(() => {
+    let lecture = 0
+    let lab = 0
+    for (const e of entries) {
+      if ((e.subject?.type ?? "") === "LABORATORY") lab++
+      else lecture++
+    }
+    const total = lecture + lab || 1
+    return [
+      { name: "Lecture", value: Math.round((lecture / total) * 100), color: "#1B4332" },
+      { name: "Laboratory", value: Math.round((lab / total) * 100), color: "#52B788" },
+    ].filter((d) => d.value > 0)
+  }, [entries])
+
+  // ── Weekly class distribution + conflict count ────────────────────────
+  const weeklyTrend = useMemo(() => {
+    const dayMap = new Map<string, { classes: number; conflicts: number }>()
+    for (const d of DAY_ORDER) dayMap.set(d, { classes: 0, conflicts: 0 })
+
+    for (const e of entries) {
+      if (dayMap.has(e.day)) dayMap.get(e.day)!.classes++
+    }
+
+    for (const day of DAY_ORDER) {
+      const dayEntries = entries.filter((e: any) => e.day === day)
+      let conflicts = 0
+      for (let i = 0; i < dayEntries.length; i++) {
+        for (let j = i + 1; j < dayEntries.length; j++) {
+          const a = dayEntries[i]
+          const b = dayEntries[j]
+          const overlaps =
+            toMins(a.startTime) < toMins(b.endTime) &&
+            toMins(b.startTime) < toMins(a.endTime)
+          if (overlaps) {
+            const sameRoom =
+              (a.roomId ?? a.room?.id) &&
+              (a.roomId ?? a.room?.id) === (b.roomId ?? b.room?.id)
+            const sameFaculty =
+              (a.facultyId ?? a.faculty?.id) &&
+              (a.facultyId ?? a.faculty?.id) === (b.facultyId ?? b.faculty?.id)
+            if (sameRoom || sameFaculty) conflicts++
+          }
+        }
+      }
+      dayMap.get(day)!.conflicts = conflicts
+    }
+
+    return DAY_ORDER.map((d) => ({ day: DAY_SHORT[d], ...dayMap.get(d)! }))
+  }, [entries])
+
+  // ── KPI summary values ────────────────────────────────────────────────
+  const avgRoomUtil =
+    roomUtilization.length > 0
+      ? Math.round(
+          roomUtilization.reduce((s, r) => s + r.utilization, 0) /
+            roomUtilization.length
+        )
+      : 0
+
+  const avgFacultyLoad =
+    facultyLoad.length > 0
+      ? Math.round(
+          (facultyLoad.reduce((s, f) => s + f.current, 0) / facultyLoad.length) * 10
+        ) / 10
+      : 0
+
+  const totalConflicts = weeklyTrend.reduce((s, d) => s + d.conflicts, 0)
+
+  function scheduleLabel(s: any) {
+    const sem =
+      s.semester?.type === "FIRST"
+        ? "1st Sem"
+        : s.semester?.type === "SECOND"
+        ? "2nd Sem"
+        : "Summer"
+    const ay = s.semester?.academicYear?.label ?? ""
+    const dept = s.department?.abbreviation ?? s.department?.name ?? ""
+    return `${sem} ${ay}${dept ? ` — ${dept}` : ""}`
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Analytics"
-        description="Schedule utilization and performance insights"
         action={
-          <Select defaultValue="1st-2025">
-            <SelectTrigger className="w-52">
-              <SelectValue />
+          <Select value={selectedScheduleId} onValueChange={(v) => setSelectedScheduleId(v ?? "")}>
+            <SelectTrigger className="w-64">
+              <SelectValue
+                placeholder={loadingSchedules ? "Loading…" : "Select a schedule…"}
+              />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="1st-2025">1st Semester 2025-2026</SelectItem>
-              <SelectItem value="2nd-2025">2nd Semester 2025-2026</SelectItem>
+              {schedules.map((s: any) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {scheduleLabel(s)}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         }
       />
 
-      {/* KPI Summary */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KPICard
-          title="Avg Room Utilization"
-          value="71%"
-          change={{ value: 8, label: "vs last sem" }}
-          icon={DoorOpen}
-          variant="default"
-        />
-        <KPICard
-          title="Faculty Load Balance"
-          value="78%"
-          change={{ value: 5, label: "improvement" }}
-          icon={Users}
-          variant="accent"
-        />
-        <KPICard
-          title="Schedule Coverage"
-          value="94%"
-          change={{ value: 3, label: "vs last sem" }}
-          icon={CalendarDays}
-          variant="default"
-        />
-        <KPICard
-          title="Conflict Rate"
-          value="2.1%"
-          change={{ value: -45, label: "reduction" }}
-          icon={AlertTriangle}
-          variant="error"
-        />
-      </div>
+      {!selectedScheduleId ? (
+        <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-border text-center text-sm text-muted-foreground">
+          Select a schedule to view analytics
+        </div>
+      ) : loadingDetail ? (
+        <div className="flex h-64 items-center justify-center text-muted-foreground text-sm">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          Loading analytics…
+        </div>
+      ) : entries.length === 0 ? (
+        <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-border text-center text-sm text-muted-foreground">
+          No entries found for this schedule
+        </div>
+      ) : (
+        <>
+          {/* KPI Cards */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <KPICard
+              title="Avg Room Utilization"
+              value={`${avgRoomUtil}%`}
+              icon={DoorOpen}
+              variant="default"
+            />
+            <KPICard
+              title="Avg Faculty Load"
+              value={`${avgFacultyLoad}h / wk`}
+              icon={Users}
+              variant="accent"
+            />
+            <KPICard
+              title="Total Entries"
+              value={String(entries.length)}
+              icon={CalendarDays}
+              variant="default"
+            />
+            <KPICard
+              title="Conflicts Detected"
+              value={String(totalConflicts)}
+              icon={AlertTriangle}
+              variant={totalConflicts > 0 ? "error" : "default"}
+            />
+          </div>
 
-      {/* Charts Row 1 */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Room Utilization */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <DoorOpen className="h-4 w-4 text-muted-foreground" />
-              Room Utilization
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={roomUtilization} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
-                <XAxis dataKey="room" tick={{ fontSize: 11, fill: "#64748B" }} />
-                <YAxis
-                  tickFormatter={(v) => `${v}%`}
-                  tick={{ fontSize: 11, fill: "#64748B" }}
-                  domain={[0, 100]}
-                />
-                <Tooltip
-                  formatter={(value) => [`${value}%`, "Utilization"]}
-                  contentStyle={{
-                    background: "#fff",
-                    border: "1px solid #E2E8F0",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
-                />
-                <Bar dataKey="utilization" radius={[4, 4, 0, 0]}>
-                  {roomUtilization.map((entry, i) => (
-                    <Cell
-                      key={i}
-                      fill={
-                        entry.utilization >= 80
-                          ? "#1B4332"
-                          : entry.utilization >= 50
-                          ? "#52B788"
-                          : "#CBD5E1"
-                      }
+          {/* Charts Row 1 */}
+          <div className="grid gap-6 lg:grid-cols-2">
+            {roomUtilization.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <DoorOpen className="h-4 w-4 text-muted-foreground" />
+                    Room Utilization
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart
+                      data={roomUtilization}
+                      margin={{ top: 4, right: 16, bottom: 4, left: 0 }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="#E2E8F0"
+                        vertical={false}
+                      />
+                      <XAxis
+                        dataKey="room"
+                        tick={{ fontSize: 11, fill: "#64748B" }}
+                      />
+                      <YAxis
+                        tickFormatter={(v) => `${v}%`}
+                        tick={{ fontSize: 11, fill: "#64748B" }}
+                        domain={[0, 100]}
+                      />
+                      <Tooltip
+                        formatter={(value) => [`${value}%`, "Utilization"]}
+                        contentStyle={{
+                          background: "#fff",
+                          border: "1px solid #E2E8F0",
+                          borderRadius: "8px",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <Bar dataKey="utilization" radius={[4, 4, 0, 0]}>
+                        {roomUtilization.map((entry, i) => (
+                          <Cell
+                            key={i}
+                            fill={
+                              entry.utilization >= 80
+                                ? "#1B4332"
+                                : entry.utilization >= 50
+                                ? "#52B788"
+                                : "#CBD5E1"
+                            }
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
+
+            {facultyLoad.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Users className="h-4 w-4 text-muted-foreground" />
+                    Faculty Teaching Load (hrs / wk)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart
+                      data={facultyLoad}
+                      layout="vertical"
+                      margin={{ top: 4, right: 16, bottom: 4, left: 80 }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="#E2E8F0"
+                        horizontal={false}
+                      />
+                      <XAxis
+                        type="number"
+                        domain={[0, 24]}
+                        tick={{ fontSize: 11, fill: "#64748B" }}
+                        tickFormatter={(v) => `${v}h`}
+                      />
+                      <YAxis
+                        type="category"
+                        dataKey="name"
+                        tick={{ fontSize: 10, fill: "#64748B" }}
+                        width={75}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          background: "#fff",
+                          border: "1px solid #E2E8F0",
+                          borderRadius: "8px",
+                          fontSize: "12px",
+                        }}
+                        formatter={(v) => [`${v}h`, "Load"]}
+                      />
+                      <Bar
+                        dataKey="current"
+                        name="Hours"
+                        fill="#1B4332"
+                        radius={[0, 4, 4, 0]}
+                        barSize={14}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* Charts Row 2 */}
+          <div className="grid gap-6 lg:grid-cols-3">
+            {subjectDistribution.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <BookOpen className="h-4 w-4 text-muted-foreground" />
+                    Subject Types
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ResponsiveContainer width="100%" height={220}>
+                    <PieChart>
+                      <Pie
+                        data={subjectDistribution}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={55}
+                        outerRadius={85}
+                        paddingAngle={3}
+                        dataKey="value"
+                        label={({ name, value }) => `${name} ${value}%`}
+                        labelLine={false}
+                      >
+                        {subjectDistribution.map((entry, i) => (
+                          <Cell key={i} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        formatter={(v) => [`${v}%`, ""]}
+                        contentStyle={{
+                          background: "#fff",
+                          border: "1px solid #E2E8F0",
+                          borderRadius: "8px",
+                          fontSize: "12px",
+                        }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
+
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <TrendingUp className="h-4 w-4 text-muted-foreground" />
+                  Weekly Class Distribution
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ResponsiveContainer width="100%" height={220}>
+                  <LineChart
+                    data={weeklyTrend}
+                    margin={{ top: 4, right: 16, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                    <XAxis dataKey="day" tick={{ fontSize: 12, fill: "#64748B" }} />
+                    <YAxis tick={{ fontSize: 12, fill: "#64748B" }} />
+                    <Tooltip
+                      contentStyle={{
+                        background: "#fff",
+                        border: "1px solid #E2E8F0",
+                        borderRadius: "8px",
+                        fontSize: "12px",
+                      }}
                     />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        {/* Faculty Load */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Users className="h-4 w-4 text-muted-foreground" />
-              Faculty Teaching Load
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart
-                data={facultyLoad}
-                layout="vertical"
-                margin={{ top: 4, right: 16, bottom: 4, left: 70 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
-                <XAxis
-                  type="number"
-                  domain={[0, 24]}
-                  tick={{ fontSize: 11, fill: "#64748B" }}
-                  tickFormatter={(v) => `${v}u`}
-                />
-                <YAxis
-                  type="category"
-                  dataKey="name"
-                  tick={{ fontSize: 11, fill: "#64748B" }}
-                  width={65}
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: "#fff",
-                    border: "1px solid #E2E8F0",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
-                />
-                <Bar dataKey="current" name="Current" fill="#1B4332" radius={[0, 4, 4, 0]} barSize={14} />
-                <Bar dataKey="max" name="Max" fill="#E2E8F0" radius={[0, 4, 4, 0]} barSize={14} />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Charts Row 2 */}
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Subject Distribution */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <BookOpen className="h-4 w-4 text-muted-foreground" />
-              Subject Types
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart>
-                <Pie
-                  data={subjectDistribution}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={55}
-                  outerRadius={85}
-                  paddingAngle={3}
-                  dataKey="value"
-                  label={({ name, percent }) =>
-                    `${name} ${((percent ?? 0) * 100).toFixed(0)}%`
-                  }
-                  labelLine={false}
-                >
-                  {subjectDistribution.map((entry, i) => (
-                    <Cell key={i} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{
-                    background: "#fff",
-                    border: "1px solid #E2E8F0",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        {/* Weekly Trend */}
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <TrendingUp className="h-4 w-4 text-muted-foreground" />
-              Weekly Class Distribution
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={weeklyTrend} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                <XAxis dataKey="day" tick={{ fontSize: 12, fill: "#64748B" }} />
-                <YAxis tick={{ fontSize: 12, fill: "#64748B" }} />
-                <Tooltip
-                  contentStyle={{
-                    background: "#fff",
-                    border: "1px solid #E2E8F0",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
-                />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="classes"
-                  name="Classes"
-                  stroke="#1B4332"
-                  strokeWidth={2}
-                  dot={{ r: 4, fill: "#1B4332" }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="conflicts"
-                  name="Conflicts"
-                  stroke="#DC2626"
-                  strokeWidth={2}
-                  dot={{ r: 4, fill: "#DC2626" }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </div>
+                    <Legend />
+                    <Line
+                      type="monotone"
+                      dataKey="classes"
+                      name="Classes"
+                      stroke="#1B4332"
+                      strokeWidth={2}
+                      dot={{ r: 4, fill: "#1B4332" }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="conflicts"
+                      name="Conflicts"
+                      stroke="#DC2626"
+                      strokeWidth={2}
+                      dot={{ r: 4, fill: "#DC2626" }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+          </div>
+        </>
+      )}
     </div>
   )
 }

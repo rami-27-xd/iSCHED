@@ -308,11 +308,6 @@ export default function CoursesPage() {
     <RoleGuard allowedRoles={["SUPER_ADMIN", "ADMIN"]}>
     <div className="space-y-6">
       <PageHeader
-        title="Departments"
-        description={isSuperAdmin
-          ? "Manage GEC and PATHFIT subjects across all programs"
-          : "Manage subjects, sections, and academic structure for your department"
-        }
         action={
           isAdmin && (
             <Button variant="outline" size="sm" onClick={() => setRequestOpen(true)}>
@@ -368,10 +363,10 @@ export default function CoursesPage() {
       ) : (
         <div className="space-y-3">
           {filtered.map((college: any) => {
-            const dept = college.departments?.[0]
+            const depts = college.departments ?? []
             const isExpanded = expandedColleges.has(college.id)
-            const programCount = dept?.programs?.length ?? 0
-            const subjectCount = dept?.subjects?.length ?? 0
+            const programCount = depts.reduce((acc: number, d: any) => acc + (d.programs?.length ?? 0), 0)
+            const subjectCount = depts.reduce((acc: number, d: any) => acc + (d.subjects?.length ?? 0), 0)
 
             return (
               <Card key={college.id} className="overflow-hidden">
@@ -390,142 +385,196 @@ export default function CoursesPage() {
                 </button>
 
                 {/* Expanded Content */}
-                {isExpanded && dept && (
+                {isExpanded && depts.length > 0 && (
                   <CardContent className="border-t pt-4 space-y-4">
-                    {/* Programs */}
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Programs / Courses</h4>
-                      </div>
-                      {(dept.programs ?? []).length === 0 ? (
-                        <p className="text-sm text-muted-foreground italic">No programs</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {dept.programs.map((prog: any) => {
-                            const progExpanded = expandedPrograms.has(prog.id)
-                            const allDeptSubjects: any[] = dept.subjects ?? []
-                            const hasMap = hasCurriculumMap(prog.abbreviation)
-                            return (
-                              <div key={prog.id} className="rounded-lg border">
-                                <button
-                                  onClick={() => toggleProgram(prog.id)}
-                                  className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/30 transition-colors"
-                                >
-                                  {progExpanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-                                  <GraduationCap className="h-4 w-4 text-[#D4AF37]" />
-                                  <span className="text-sm font-medium flex-1">{prog.name}</span>
-                                  <Badge variant="secondary" className="text-xs font-mono">{prog.abbreviation}</Badge>
-                                </button>
-                                {progExpanded && (
-                                  <div className="border-t px-3 py-3 bg-muted/10 space-y-4">
-                                    {/* Year Levels with Sections AND Subjects */}
-                                    <div className="space-y-4">
-                                      {(prog.yearLevels ?? []).map((yl: any) => {
-                                        // Use curriculum map for precise subject placement per program/year/semester
-                                        const ylSubjects = hasMap
-                                          ? (() => {
-                                              const codes = getCurriculumCodes(prog.abbreviation, yl.level, semesterFilter as "FIRST" | "SECOND")
-                                              const codeSetLower = new Set(codes.map(c => c.toLowerCase()))
-                                              // Also filter by semester field so subjects don't appear in the wrong semester tab
-                                              return allDeptSubjects.filter((s: any) =>
-                                                codeSetLower.has((s.code ?? "").toLowerCase()) &&
-                                                s.semester === semesterFilter
+                    {depts.map((dept: any, deptIdx: number) => {
+                      const allDeptSubjects: any[] = dept.subjects ?? []
+                      const showDeptHeader = depts.length > 1
+                      return (
+                        <div key={dept.id} className={deptIdx > 0 ? "border-t pt-4" : ""}>
+                          {/* Sub-department header — shown when college has multiple sub-depts (e.g. CAS → SS/LLH/MNS) */}
+                          {showDeptHeader && (
+                            <div className="flex items-center gap-2 mb-3">
+                              <span className="text-sm font-semibold text-[#1B4332]">{dept.name}</span>
+                              <Badge variant="outline" className="text-xs font-mono">{dept.abbreviation}</Badge>
+                            </div>
+                          )}
+
+                          {/* Programs */}
+                          {(dept.programs ?? []).length > 0 && (
+                            <div>
+                              <div className="flex items-center justify-between mb-2">
+                                <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Programs / Courses</h4>
+                              </div>
+                              <div className="space-y-2">
+                                {dept.programs.map((prog: any) => {
+                                  const progExpanded = expandedPrograms.has(prog.id)
+                                  const hasMap = hasCurriculumMap(prog.abbreviation)
+                                  return (
+                                    <div key={prog.id} className="rounded-lg border">
+                                      <button
+                                        onClick={() => toggleProgram(prog.id)}
+                                        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/30 transition-colors"
+                                      >
+                                        {progExpanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+                                        <GraduationCap className="h-4 w-4 text-[#D4AF37]" />
+                                        <span className="text-sm font-medium flex-1">{prog.name}</span>
+                                        <Badge variant="secondary" className="text-xs font-mono">{prog.abbreviation}</Badge>
+                                      </button>
+                                      {progExpanded && (
+                                        <div className="border-t px-3 py-3 bg-muted/10 space-y-4">
+                                          {/* Year Levels with Sections AND Subjects */}
+                                          <div className="space-y-4">
+                                            {(prog.yearLevels ?? []).map((yl: any) => {
+                                              // Use curriculum map for precise subject placement per program/year/semester
+                                              const ylSubjects = hasMap
+                                                ? (() => {
+                                                    // The curriculum map already encodes year+semester placement.
+                                                    // Do NOT also filter by s.semester — GEC subjects carry their
+                                                    // canonical dept semester which may differ from program placement.
+                                                    const codes = getCurriculumCodes(prog.abbreviation, yl.level, semesterFilter as "FIRST" | "SECOND")
+                                                    const codeSetLower = new Set(codes.map(c => c.toLowerCase()))
+                                                    return allDeptSubjects.filter((s: any) =>
+                                                      codeSetLower.has((s.code ?? "").toLowerCase())
+                                                    )
+                                                  })()
+                                                : allDeptSubjects.filter((s: any) =>
+                                                    (s.yearLevelId === yl.id || (!s.yearLevelId && s.year === yl.level)) &&
+                                                    s.semester === semesterFilter
+                                                  )
+                                              return (
+                                                <div key={yl.id} className="space-y-2">
+                                                  <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2">
+                                                      <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                                                      <span className="text-xs font-semibold">Year {yl.level}</span>
+                                                      <Badge variant="outline" className="text-[10px]">
+                                                        {ylSubjects.length} subjects
+                                                      </Badge>
+                                                    </div>
+                                                    <div className="flex items-center gap-1">
+                                                      <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        className="h-6 px-2 text-xs"
+                                                        onClick={() => openAddSection(yl.id, prog.abbreviation, yl.level)}
+                                                      >
+                                                        <Plus className="h-3 w-3 mr-1" />Section
+                                                      </Button>
+                                                      <Button
+                                                        variant="outline"
+                                                        size="sm"
+                                                        className="h-6 px-2 text-xs"
+                                                        onClick={() => openAddSubject(dept.id, yl.id)}
+                                                      >
+                                                        <Plus className="h-3 w-3 mr-1" />Subject
+                                                      </Button>
+                                                    </div>
+                                                  </div>
+                                                  {/* Sections */}
+                                                  <div className="flex flex-wrap gap-1.5 ml-5">
+                                                    {(yl.sections ?? []).map((sec: any) => (
+                                                      <button
+                                                        key={sec.id}
+                                                        onClick={() => openEditSection(sec)}
+                                                        className="inline-flex items-center gap-1 rounded-md bg-white border px-2 py-0.5 text-xs hover:bg-muted/50 transition-colors"
+                                                      >
+                                                        <Users2 className="h-3 w-3 text-muted-foreground" />
+                                                        {sec.name}
+                                                      </button>
+                                                    ))}
+                                                    {(yl.sections ?? []).length === 0 && (
+                                                      <span className="text-xs text-muted-foreground italic">No sections</span>
+                                                    )}
+                                                  </div>
+                                                  {/* Subjects for this year level */}
+                                                  {ylSubjects.length > 0 && (
+                                                    <div className="ml-5">
+                                                      <SubjectTable subjects={ylSubjects} onEdit={openEditSubject} onDelete={handleDeleteSubject} displayYear={yl.level} displaySemester={semesterFilter} />
+                                                    </div>
+                                                  )}
+                                                  {ylSubjects.length === 0 && (
+                                                    <p className="ml-5 text-xs text-muted-foreground italic">No subjects for {semesterFilter === "FIRST" ? "1st" : "2nd"} semester</p>
+                                                  )}
+                                                </div>
                                               )
-                                            })()
-                                          : allDeptSubjects.filter((s: any) =>
-                                              (s.yearLevelId === yl.id || (!s.yearLevelId && s.year === yl.level)) &&
-                                              s.semester === semesterFilter
-                                            )
-                                        return (
-                                          <div key={yl.id} className="space-y-2">
-                                            <div className="flex items-center justify-between">
-                                              <div className="flex items-center gap-2">
-                                                <Layers className="h-3.5 w-3.5 text-muted-foreground" />
-                                                <span className="text-xs font-semibold">Year {yl.level}</span>
-                                                <Badge variant="outline" className="text-[10px]">
-                                                  {ylSubjects.length} subjects
-                                                </Badge>
-                                              </div>
-                                              <div className="flex items-center gap-1">
-                                                <Button
-                                                  variant="ghost"
-                                                  size="sm"
-                                                  className="h-6 px-2 text-xs"
-                                                  onClick={() => openAddSection(yl.id, prog.abbreviation, yl.level)}
-                                                >
-                                                  <Plus className="h-3 w-3 mr-1" />Section
-                                                </Button>
-                                                <Button
-                                                  variant="outline"
-                                                  size="sm"
-                                                  className="h-6 px-2 text-xs"
-                                                  onClick={() => openAddSubject(dept.id, yl.id)}
-                                                >
-                                                  <Plus className="h-3 w-3 mr-1" />Subject
-                                                </Button>
-                                              </div>
-                                            </div>
-                                            {/* Sections */}
-                                            <div className="flex flex-wrap gap-1.5 ml-5">
-                                              {(yl.sections ?? []).map((sec: any) => (
-                                                <button
-                                                  key={sec.id}
-                                                  onClick={() => openEditSection(sec)}
-                                                  className="inline-flex items-center gap-1 rounded-md bg-white border px-2 py-0.5 text-xs hover:bg-muted/50 transition-colors"
-                                                >
-                                                  <Users2 className="h-3 w-3 text-muted-foreground" />
-                                                  {sec.name}
-                                                </button>
-                                              ))}
-                                              {(yl.sections ?? []).length === 0 && (
-                                                <span className="text-xs text-muted-foreground italic">No sections</span>
-                                              )}
-                                            </div>
-                                            {/* Subjects for this year level */}
-                                            {ylSubjects.length > 0 && (
-                                              <div className="ml-5">
-                                                <SubjectTable subjects={ylSubjects} onEdit={openEditSubject} onDelete={handleDeleteSubject} displayYear={yl.level} displaySemester={semesterFilter} />
-                                              </div>
-                                            )}
-                                            {ylSubjects.length === 0 && (
-                                              <p className="ml-5 text-xs text-muted-foreground italic">No subjects for {semesterFilter === "FIRST" ? "1st" : "2nd"} semester</p>
+                                            })}
+                                            {(prog.yearLevels ?? []).length === 0 && (
+                                              <p className="text-xs text-muted-foreground italic">No year levels configured</p>
                                             )}
                                           </div>
-                                        )
-                                      })}
-                                      {(prog.yearLevels ?? []).length === 0 && (
-                                        <p className="text-xs text-muted-foreground italic">No year levels configured</p>
+
+                                          {/* General / Unassigned Subjects (only for programs without curriculum map) */}
+                                          {!hasMap && (() => {
+                                            const yearLevels = (prog.yearLevels ?? []).map((yl: any) => yl.level)
+                                            const unassigned = allDeptSubjects.filter((s: any) => !s.yearLevelId && !yearLevels.includes(s.year))
+                                            if (unassigned.length === 0) return null
+                                            return (
+                                              <div>
+                                                <div className="flex items-center justify-between mb-2">
+                                                  <h5 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
+                                                    <BookOpen className="h-3 w-3" />
+                                                    General / Unassigned Subjects
+                                                  </h5>
+                                                  <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => openAddSubject(dept.id)}>
+                                                    <Plus className="h-3 w-3 mr-1" />Add Subject
+                                                  </Button>
+                                                </div>
+                                                <SubjectTable subjects={unassigned} onEdit={openEditSubject} onDelete={handleDeleteSubject} />
+                                              </div>
+                                            )
+                                          })()}
+                                        </div>
                                       )}
                                     </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
 
-                                    {/* General / Unassigned Subjects (only for programs without curriculum map) */}
-                                    {!hasMap && (() => {
-                                      const yearLevels = (prog.yearLevels ?? []).map((yl: any) => yl.level)
-                                      const unassigned = allDeptSubjects.filter((s: any) => !s.yearLevelId && !yearLevels.includes(s.year))
-                                      if (unassigned.length === 0) return null
-                                      return (
-                                        <div>
-                                          <div className="flex items-center justify-between mb-2">
-                                            <h5 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
-                                              <BookOpen className="h-3 w-3" />
-                                              General / Unassigned Subjects
-                                            </h5>
-                                            <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => openAddSubject(dept.id)}>
-                                              <Plus className="h-3 w-3 mr-1" />Add Subject
-                                            </Button>
-                                          </div>
-                                          <SubjectTable subjects={unassigned} onEdit={openEditSubject} onDelete={handleDeleteSubject} />
+                          {/* Department-level subjects for depts without programs (CAS GEC sub-depts: SS, LLH, MNS) */}
+                          {(dept.programs ?? []).length === 0 && (() => {
+                            const deptSubjects = allDeptSubjects.filter((s: any) => s.semester === semesterFilter)
+                            if (deptSubjects.length === 0) {
+                              return (
+                                <div className="flex items-center justify-between">
+                                  <p className="text-sm text-muted-foreground italic">No subjects for {semesterFilter === "FIRST" ? "1st" : "2nd"} semester</p>
+                                  <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => openAddSubject(dept.id)}>
+                                    <Plus className="h-3 w-3 mr-1" />Add Subject
+                                  </Button>
+                                </div>
+                              )
+                            }
+                            const years = [...new Set(deptSubjects.map((s: any) => s.year as number))].sort((a, b) => a - b)
+                            return (
+                              <div className="space-y-4">
+                                {years.map(yr => {
+                                  const yrSubjects = deptSubjects.filter((s: any) => s.year === yr)
+                                  return (
+                                    <div key={yr} className="space-y-2">
+                                      <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                          <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                                          <span className="text-xs font-semibold">Year {yr}</span>
+                                          <Badge variant="outline" className="text-[10px]">{yrSubjects.length} subjects</Badge>
                                         </div>
-                                      )
-                                    })()}
-                                  </div>
-                                )}
+                                        <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={() => openAddSubject(dept.id)}>
+                                          <Plus className="h-3 w-3 mr-1" />Subject
+                                        </Button>
+                                      </div>
+                                      <div className="ml-5">
+                                        <SubjectTable subjects={yrSubjects} onEdit={openEditSubject} onDelete={handleDeleteSubject} />
+                                      </div>
+                                    </div>
+                                  )
+                                })}
                               </div>
                             )
-                          })}
+                          })()}
                         </div>
-                      )}
-                    </div>
+                      )
+                    })}
                   </CardContent>
                 )}
               </Card>

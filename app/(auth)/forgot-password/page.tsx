@@ -30,8 +30,16 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#1B4332] flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen bg-[#1B4332] flex items-center justify-center px-4 relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+        <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-white/[0.04]" />
+        <div className="absolute -bottom-24 -right-24 h-80 w-80 rounded-full bg-white/[0.04]" />
+        <div className="absolute top-1/4 right-12 h-40 w-40 rounded-full border border-white/[0.07]" />
+        <div className="absolute top-1/3 left-1/4 h-2 w-2 rounded-full bg-[#D4AF37]/50" />
+        <div className="absolute bottom-1/3 right-1/3 h-2.5 w-2.5 rounded-full bg-[#D4AF37]/35" />
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#D4AF37]/50 to-transparent" />
+      </div>
+      <div className="w-full max-w-sm relative z-10">
         <div className="text-center mb-8">
           <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-[#D4AF37] mb-4">
             <CalendarDays className="h-6 w-6 text-[#1B4332]" />

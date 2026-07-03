@@ -157,23 +157,15 @@ export default function MySchedulePage() {
   return (
     <RoleGuard allowedRoles={["FACULTY", "SUPER_ADMIN", "ADMIN"]}>
     <div className="space-y-4 sm:space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">My Schedule</h1>
-          <p className="text-xs sm:text-sm text-muted-foreground">
-            {semesterInfo
-              ? `${semesterInfo.semType} — ${semesterInfo.ay}`
-              : "View your assigned class schedule for the current semester."}
-          </p>
-        </div>
-        {entries.length > 0 && (
+      {/* Export action */}
+      {entries.length > 0 && (
+        <div className="flex justify-end">
           <Button variant="outline" size="sm" onClick={handleExport} className="w-fit">
             <FileDown className="mr-2 h-4 w-4" />
             Print / Export
           </Button>
-        )}
-      </div>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center py-16 text-muted-foreground">

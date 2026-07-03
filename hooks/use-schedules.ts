@@ -22,13 +22,14 @@ async function rawFetch(url: string, options?: RequestInit) {
 }
 
 // ---------- Fetch schedules list ----------
-export function useSchedules(semesterId?: string, isArchived = false) {
+export function useSchedules(semesterId?: string, isArchived = false, collegeId?: string | null) {
   return useQuery({
-    queryKey: ["schedules", { semesterId, isArchived }],
+    queryKey: ["schedules", { semesterId, isArchived, collegeId }],
     queryFn: async () => {
       const params = new URLSearchParams()
       if (semesterId) params.set("semesterId", semesterId)
       if (isArchived) params.set("isArchived", "true")
+      if (collegeId) params.set("collegeId", collegeId)
       return safeFetch<any[]>(`/api/schedules?${params}`)
     },
     staleTime: 0,
@@ -134,7 +135,7 @@ export function useDeleteSchedule() {
   })
 }
 
-// ---------- Update schedule entry (auto-save) ----------
+// ---------- Update schedule entry ----------
 export function useUpdateEntry() {
   const queryClient = useQueryClient()
 
@@ -146,7 +147,8 @@ export function useUpdateEntry() {
         body: JSON.stringify(changes),
       })
       if (json.error) throw new Error(json.error)
-      return json.data
+      // warning is returned when force:true bypassed a constraint
+      return { data: json.data, warning: (json.warning as string) ?? null }
     },
     onSuccess: (_data, { scheduleId }) => {
       queryClient.invalidateQueries({ queryKey: ["schedules", scheduleId] })
@@ -246,6 +248,7 @@ export function useCreateEntry() {
       entry: {
         subjectId: string
         facultyId: string
+        facultyName?: string | null  // free-text name override
         roomId: string
         sectionId: string
         day: string

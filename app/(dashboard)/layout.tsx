@@ -20,14 +20,23 @@ export default async function DashboardLayout({
   let userName = "User"
   let userEmail = user.email ?? ""
   let isApproved = false
+  let defaultCollegeId: string | null = null
 
   try {
     const dbUser = await ensureDbUser(user)
     if (dbUser) {
       userRole = dbUser.role
       userName = `${dbUser.firstName} ${dbUser.lastName}`.trim() || "User"
-      userEmail = dbUser.email
+      userEmail = dbUser.email ?? ""
       isApproved = dbUser.isApproved
+
+      // Resolve the college this user belongs to for per-college filtering
+      defaultCollegeId =
+        (dbUser as any).department?.college?.id ??
+        (dbUser as any).departmentChair?.department?.college?.id ??
+        (dbUser as any).programHead?.program?.department?.college?.id ??
+        (dbUser as any).faculty?.department?.college?.id ??
+        null
     }
   } catch {
     // DB not connected — use Supabase user data, treat as unapproved
@@ -45,6 +54,7 @@ export default async function DashboardLayout({
       userRole={userRole}
       userName={userName}
       userEmail={userEmail}
+      defaultCollegeId={defaultCollegeId}
     >
       {children}
     </DashboardShell>

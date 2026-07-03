@@ -42,6 +42,22 @@ export function useCreateBuilding() {
   })
 }
 
+export function useUpdateBuilding() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Record<string, unknown>) =>
+      apiFetch("/api/buildings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["buildings"] })
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
+}
+
 // ─── Semesters ────────────────────────────────────────────────────────────────
 
 export function useSemesters() {
@@ -202,9 +218,10 @@ export function useUsers(params?: { approved?: boolean }) {
 
 // ─── Faculty ──────────────────────────────────────────────────────────────────
 
-export function useFacultyList(params?: { departmentId?: string }) {
+export function useFacultyList(params?: { departmentId?: string; collegeId?: string }) {
   const query = new URLSearchParams()
   if (params?.departmentId) query.set("departmentId", params.departmentId)
+  if (params?.collegeId) query.set("collegeId", params.collegeId)
 
   return useQuery({
     queryKey: ["faculty", params],

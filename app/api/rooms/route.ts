@@ -6,24 +6,53 @@ import { apiResponse, apiError } from "@/lib/api-helpers"
 export async function GET(req: Request) {
   try {
     const user = await getAuthenticatedUser()
-    if (!user) {
-      return NextResponse.json(apiError("Unauthorized"), { status: 401 })
-    }
+    if (!user) return NextResponse.json(apiError("Unauthorized"), { status: 401 })
 
     const { searchParams } = new URL(req.url)
     const type = searchParams.get("type")
     const buildingId = searchParams.get("buildingId")
+    const collegeId = searchParams.get("collegeId")
+
+    // Department-building restriction filter:
+    // When ?departmentId=X is passed, only return rooms whose building is mapped
+    // to that department via DepartmentBuilding. This enforces the rule that users
+    // can only choose rooms in buildings assigned to their department.
+    const departmentId = searchParams.get("departmentId")
+
+    let allowedBuildingIds: string[] | undefined
+
+    if (departmentId) {
+      const mappings = await db.departmentBuilding.findMany({
+        where: { departmentId },
+        select: { buildingId: true },
+      })
+      allowedBuildingIds = mappings.map((m) => m.buildingId)
+      // If the department has no building mappings, return all (fallback for legacy data)
+      if (allowedBuildingIds.length === 0) {
+        allowedBuildingIds = undefined
+      }
+    }
+
+    // Handle comma-separated type values (e.g. type=LABORATORY,COMPUTER_LAB)
+    const typeFilter = type
+      ? type.includes(",")
+        ? { in: type.split(",") as any[] }
+        : (type as any)
+      : undefined
 
     const rooms = await db.room.findMany({
       where: {
-        ...(type ? { type: type as any } : {}),
+        isActive: true,
+        ...(typeFilter ? { type: typeFilter } : {}),
         ...(buildingId ? { buildingId } : {}),
+        ...(allowedBuildingIds ? { buildingId: { in: allowedBuildingIds } } : {}),
       },
       include: {
         building: true,
+        departments: { include: { department: true } },
         _count: { select: { scheduleEntries: true } },
       },
-      orderBy: { name: "asc" },
+      orderBy: [{ building: { name: "asc" } }, { name: "asc" }],
     })
 
     return NextResponse.json(apiResponse(rooms))
@@ -36,18 +65,21 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const user = await getAuthenticatedUser()
-    if (!user) {
-      return NextResponse.json(apiError("Unauthorized"), { status: 401 })
-    }
+    if (!user) return NextResponse.json(apiError("Unauthorized"), { status: 401 })
 
-    // Only SUPER_ADMIN and ADMIN can create rooms
     const dbUser = await getCurrentUser()
     if (!dbUser || !["SUPER_ADMIN", "ADMIN"].includes(dbUser.role)) {
       return NextResponse.json(apiError("Forbidden — insufficient permissions"), { status: 403 })
     }
 
     const body = await req.json()
-    const { name, code, buildingId, type, equipment } = body
+    const { name, code, buildingId, type, equipment, restrictedDepartmentIds } = body
+
+    if (!name || !code || !buildingId || !type) {
+      return NextResponse.json(apiError("name, code, buildingId, and type are required"), { status: 400 })
+    }
+
+    const deptIds: string[] = Array.isArray(restrictedDepartmentIds) ? restrictedDepartmentIds : []
 
     const room = await db.room.create({
       data: {
@@ -56,12 +88,18 @@ export async function POST(req: Request) {
         buildingId,
         type,
         equipment: equipment ?? [],
+        ...(deptIds.length > 0
+          ? { departments: { create: deptIds.map((departmentId) => ({ departmentId })) } }
+          : {}),
       },
-      include: { building: true },
+      include: { building: true, departments: { include: { department: true } } },
     })
 
     return NextResponse.json(apiResponse(room), { status: 201 })
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === "P2002") {
+      return NextResponse.json(apiError("A room with this code already exists"), { status: 409 })
+    }
     console.error("POST /api/rooms error:", error)
     return NextResponse.json(apiError("Internal server error"), { status: 500 })
   }

@@ -23,6 +23,7 @@ import { toast } from "sonner"
 import { useQuery } from "@tanstack/react-query"
 import { useFacultyList, useUpdateFaculty, useCreateFaculty, useUsers, useSubjects, useSections } from "@/hooks/use-data"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useCollege } from "@/lib/college-context"
 
 // Type for section counts per subject: { "Subject Title": numberOfSections }
 type SectionCountMap = Record<string, number>
@@ -40,12 +41,13 @@ function SpecializationPicker({
   sectionCounts: SectionCountMap
   maxUnits: number
   subjectTitles: string[]
-  subjectInfoMap: Record<string, { units: number; year: number; type: string }>
+  subjectInfoMap: Record<string, { units: number; year: number; type: string; semester?: string }>
   sectionCountByYear: Record<number, number>
   onToggle: (title: string) => void
   onSetCount: (title: string, count: number) => void
 }) {
   const [specSearch, setSpecSearch] = useState("")
+  const [semFilter, setSemFilter] = useState<"ALL" | "FIRST" | "SECOND">("ALL")
 
   const totalLoad = Object.entries(sectionCounts).reduce((sum, [title, secCount]) => {
     const info = subjectInfoMap[title]
@@ -56,10 +58,14 @@ function SpecializationPicker({
   const selectedCount = Object.keys(sectionCounts).filter(k => sectionCounts[k] > 0).length
 
   const visibleSubjects = useMemo(() => {
-    if (!specSearch.trim()) return subjectTitles
+    let pool = subjectTitles
+    if (semFilter !== "ALL") {
+      pool = pool.filter(t => (subjectInfoMap[t]?.semester ?? "FIRST") === semFilter)
+    }
+    if (!specSearch.trim()) return pool
     const q = specSearch.toLowerCase()
-    return subjectTitles.filter(t => t.toLowerCase().includes(q))
-  }, [specSearch, subjectTitles])
+    return pool.filter(t => t.toLowerCase().includes(q))
+  }, [specSearch, semFilter, subjectTitles, subjectInfoMap])
 
   function getMaxSections(title: string): number {
     const info = subjectInfoMap[title]
@@ -91,15 +97,26 @@ function SpecializationPicker({
         </p>
       )}
 
-      {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-        <Input
-          placeholder="Search subjects..."
-          value={specSearch}
-          onChange={(e) => setSpecSearch(e.target.value)}
-          className="pl-8 h-8 text-sm"
-        />
+      {/* Search + semester filter */}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="Search subjects..."
+            value={specSearch}
+            onChange={(e) => setSpecSearch(e.target.value)}
+            className="pl-8 h-8 text-sm"
+          />
+        </div>
+        <select
+          value={semFilter}
+          onChange={(e) => setSemFilter(e.target.value as "ALL" | "FIRST" | "SECOND")}
+          className="h-8 rounded-lg border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring shrink-0"
+        >
+          <option value="ALL">All Sems</option>
+          <option value="FIRST">1st Sem</option>
+          <option value="SECOND">2nd Sem</option>
+        </select>
       </div>
 
       {/* Subject list */}
@@ -189,6 +206,109 @@ function SpecializationPicker({
   )
 }
 
+// ── MobileFacultyList — extracted to avoid JSX nesting issues ──────────────────
+function MobileFacultyList({
+  grouped,
+  expandedRows,
+  subjectInfoMap,
+  onToggleRow,
+  onEdit,
+}: {
+  grouped: { label: string; abbr: string; members: any[] }[]
+  expandedRows: Set<string>
+  subjectInfoMap: Record<string, { units: number; year: number; type: string }>
+  onToggleRow: (id: string) => void
+  onEdit: (f: any) => void
+}) {
+  return (
+    <div className="space-y-5">
+      {grouped.map(({ label, abbr, members: deptMembers }) => (
+        <div key={label} className="space-y-2">
+          {/* Dept header */}
+          <div className="flex items-center gap-2 px-1">
+            <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#1B4332] text-white text-[10px] font-bold shrink-0">
+              {abbr.slice(0, 2)}
+            </div>
+            <span className="text-sm font-semibold text-[#1B4332]">{label}</span>
+            <span className="text-xs text-muted-foreground">({deptMembers.length})</span>
+          </div>
+          {/* Members */}
+          {deptMembers.map((f: any) => {
+            const saved = f.sectionCounts as Record<string, number> | null
+            const counts: Record<string, number> = saved && typeof saved === "object" && Object.keys(saved).length > 0 ? saved : {}
+            const specEntries = Object.entries(counts).filter(([, c]) => c > 0)
+            const totalLoad = specEntries.reduce((sum, [title, count]) => {
+              const info = subjectInfoMap[title]
+              return sum + (info?.units ?? 0) * count
+            }, 0)
+            return (
+              <Card key={f.id} className="overflow-hidden">
+                <CardContent className="p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-sm truncate">{f.user?.firstName} {f.user?.lastName}</p>
+                      {f.user?.email && !f.user.email.endsWith('@faculty.slsu.edu.ph') && !f.user.email.endsWith('@stub.local') && (
+                        <p className="text-xs text-muted-foreground truncate">{f.user.email}</p>
+                      )}
+                      <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                        <Badge variant="outline" className="text-xs">{f.department?.abbreviation}</Badge>
+                        <Badge variant={f.isActive ? "default" : "secondary"} className="text-xs">
+                          {f.isActive ? "Active" : "Inactive"}
+                        </Badge>
+                        <span className="text-xs text-muted-foreground">{f.maxUnitsPerWeek}u/wk</span>
+                      </div>
+                    </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" />}>
+                        <MoreHorizontal className="h-4 w-4" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => onEdit(f)}>
+                          <Briefcase className="mr-2 h-4 w-4" />Edit Faculty
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+
+                  {specEntries.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-border">
+                      <div className="flex flex-wrap gap-1">
+                        {(expandedRows.has(f.id) ? specEntries : specEntries.slice(0, 2)).map(([title, count]) => {
+                          const info = subjectInfoMap[title]
+                          return (
+                            <Badge key={title} variant="secondary" className="text-xs">
+                              {title}: {count} cls
+                              <span className="ml-1 text-muted-foreground">({(info?.units ?? 0) * count}u)</span>
+                            </Badge>
+                          )
+                        })}
+                      </div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <p className="text-[10px] text-muted-foreground">
+                          {specEntries.length} subjects · {totalLoad}u / {f.maxUnitsPerWeek}u
+                        </p>
+                        {specEntries.length > 2 && (
+                          <button
+                            type="button"
+                            onClick={() => onToggleRow(f.id)}
+                            className="text-[10px] text-[#1B4332] font-medium hover:underline"
+                          >
+                            {expandedRows.has(f.id) ? 'Show less' : `+${specEntries.length - 2} more`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function FacultyPage() {
   const [search, setSearch] = useState("")
   const [addOpen, setAddOpen] = useState(false)
@@ -200,7 +320,7 @@ export default function FacultyPage() {
   const [editOpen, setEditOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<any>(null)
   const [editForm, setEditForm] = useState({
-    firstName: "", lastName: "",
+    firstName: "", lastName: "", email: "",
     sectionCounts: {} as SectionCountMap,
     maxUnitsPerWeek: 21, isActive: true,
   })
@@ -215,15 +335,9 @@ export default function FacultyPage() {
     })
   }
 
-  const { data: faculty = [], isLoading } = useFacultyList()
-  const isMobile = useIsMobile()
-  const { data: approvedUsers = [] } = useUsers({ approved: true })
-  const { data: subjects = [] } = useSubjects()
-  const { data: sections = [] } = useSections()
-  const createFaculty = useCreateFaculty()
-  const updateFaculty = useUpdateFaculty()
+  const { selectedCollegeId } = useCollege()
 
-  // Fetch the current logged-in user (works for all roles)
+  // Fetch the current user first so we can scope the faculty query correctly
   const { data: currentUser } = useQuery({
     queryKey: ["current-user-me"],
     queryFn: async () => {
@@ -233,6 +347,21 @@ export default function FacultyPage() {
     },
   })
   const isAdmin = currentUser?.role === "ADMIN"
+  const userDeptId: string | undefined = currentUser?.departmentId ?? undefined
+
+  // ADMIN (Program Chair) — scoped to their own department only
+  // SUPER_ADMIN (Dept Head) — follows college filter; null = all colleges
+  const { data: faculty = [], isLoading } = useFacultyList(
+    isAdmin
+      ? (userDeptId ? { departmentId: userDeptId } : undefined)
+      : (selectedCollegeId ? { collegeId: selectedCollegeId } : undefined)
+  )
+  const isMobile = useIsMobile()
+  const { data: approvedUsers = [] } = useUsers({ approved: true })
+  const { data: subjects = [] } = useSubjects()
+  const { data: sections = [] } = useSections()
+  const createFaculty = useCreateFaculty()
+  const updateFaculty = useUpdateFaculty()
 
   // Subject titles for listing
   const subjectTitles = useMemo(() => {
@@ -240,12 +369,12 @@ export default function FacultyPage() {
     return [...new Set(titles)] as string[]
   }, [subjects])
 
-  // Map subject title → { units, year, type }
+  // Map subject title → { units, year, type, semester }
   const subjectInfoMap = useMemo(() => {
-    const map: Record<string, { units: number; year: number; type: string }> = {}
+    const map: Record<string, { units: number; year: number; type: string; semester: string }> = {}
     for (const s of subjects) {
       if (s.title && !map[s.title]) {
-        map[s.title] = { units: s.units ?? 0, year: s.year ?? 1, type: s.type ?? "LECTURE" }
+        map[s.title] = { units: s.units ?? 0, year: s.year ?? 1, type: s.type ?? "LECTURE", semester: s.semester ?? "FIRST" }
       }
     }
     return map
@@ -340,6 +469,19 @@ export default function FacultyPage() {
     return name.includes(search.toLowerCase()) || email.includes(search.toLowerCase())
   })
 
+  // Group filtered faculty by department for the desktop table
+  const grouped = useMemo(() => {
+    const map = new Map<string, { label: string; abbr: string; members: any[] }>()
+    for (const f of filtered) {
+      const key = f.department?.id ?? "__none__"
+      const label = f.department?.name ?? "Unassigned"
+      const abbr = f.department?.abbreviation ?? "—"
+      if (!map.has(key)) map.set(key, { label, abbr, members: [] })
+      map.get(key)!.members.push(f)
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label))
+  }, [filtered])
+
   function buildSectionCounts(f: any): SectionCountMap {
     const saved = f.sectionCounts as SectionCountMap | null
     if (saved && typeof saved === "object" && Object.keys(saved).length > 0) {
@@ -375,9 +517,13 @@ export default function FacultyPage() {
 
   function openEdit(f: any) {
     setEditTarget(f)
+    const existingEmail = f.user?.email ?? ""
+    // Don't pre-fill stub/generated emails — show blank so the user can enter a real one
+    const displayEmail = existingEmail.endsWith("@faculty.slsu.edu.ph") ? "" : existingEmail
     setEditForm({
       firstName: f.user?.firstName ?? "",
       lastName: f.user?.lastName ?? "",
+      email: displayEmail,
       sectionCounts: buildSectionCounts(f),
       maxUnitsPerWeek: f.maxUnitsPerWeek,
       isActive: f.isActive,
@@ -393,6 +539,7 @@ export default function FacultyPage() {
         id: editTarget.id,
         firstName: editForm.firstName,
         lastName: editForm.lastName,
+        email: editForm.email,
         specializations: specs,
         sectionCounts: editForm.sectionCounts,
         maxUnitsPerWeek: editForm.maxUnitsPerWeek,
@@ -408,8 +555,6 @@ export default function FacultyPage() {
     <RoleGuard allowedRoles={["SUPER_ADMIN", "ADMIN"]}>
     <div className="space-y-6">
       <PageHeader
-        title="Faculty"
-        description="Manage faculty members and their teaching assignments"
         action={
           <Dialog open={addOpen} onOpenChange={setAddOpen}>
             <DialogTrigger render={<Button />}>
@@ -508,162 +653,115 @@ export default function FacultyPage() {
         />
       ) : (
         isMobile ? (
-          /* ── Mobile: card list ── */
-          <div className="space-y-3">
-            {filtered.map((f: any) => {
-              const counts = buildSectionCounts(f)
-              const totalLoad = calcLoadFromCounts(counts)
-              const specEntries = Object.entries(counts).filter(([, c]) => c > 0)
-              return (
-                <Card key={f.id} className="overflow-hidden">
-                  <CardContent className="p-4">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-sm truncate">{f.user?.firstName} {f.user?.lastName}</p>
-                        <p className="text-xs text-muted-foreground truncate">{f.user?.email}</p>
-                        <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                          <Badge variant="outline" className="text-xs">{f.department?.abbreviation}</Badge>
-                          <Badge variant={f.isActive ? "default" : "secondary"} className="text-xs">
-                            {f.isActive ? "Active" : "Inactive"}
-                          </Badge>
-                          <span className="text-xs text-muted-foreground">{f.maxUnitsPerWeek}u/wk</span>
-                        </div>
-                      </div>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" />}>
-                          <MoreHorizontal className="h-4 w-4" />
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => openEdit(f)}>
-                            <Briefcase className="mr-2 h-4 w-4" />Edit Faculty
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-
-                    {specEntries.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-border">
-                        <div className="flex flex-wrap gap-1">
-                          {(expandedRows.has(f.id) ? specEntries : specEntries.slice(0, 2)).map(([title, count]) => {
-                            const info = subjectInfoMap[title]
-                            return (
-                              <Badge key={title} variant="secondary" className="text-xs">
-                                {title}: {count} cls
-                                <span className="ml-1 text-muted-foreground">({(info?.units ?? 0) * count}u)</span>
-                              </Badge>
-                            )
-                          })}
-                        </div>
-                        <div className="flex items-center gap-2 mt-1">
-                          <p className="text-[10px] text-muted-foreground">
-                            {specEntries.length} subjects · {totalLoad}u / {f.maxUnitsPerWeek}u
-                          </p>
-                          {specEntries.length > 2 && (
-                            <button
-                              type="button"
-                              onClick={() => toggleRow(f.id)}
-                              className="text-[10px] text-[#1B4332] font-medium hover:underline"
-                            >
-                              {expandedRows.has(f.id) ? 'Show less' : `+${specEntries.length - 2} more`}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              )
-            })}
-          </div>
+          /* ── Mobile: department-grouped card list ── */
+          <MobileFacultyList
+            grouped={grouped}
+            expandedRows={expandedRows}
+            subjectInfoMap={subjectInfoMap}
+            onToggleRow={toggleRow}
+            onEdit={openEdit}
+          />
         ) : (
-        /* ── Desktop: table ── */
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <Table className="min-w-[700px]">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Department</TableHead>
-                  <TableHead>Specializations & Load</TableHead>
-                  <TableHead>Max Units</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="w-10" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((f: any) => {
-                  const counts = buildSectionCounts(f)
-                  const totalLoad = calcLoadFromCounts(counts)
-                  const specEntries = Object.entries(counts).filter(([, c]) => c > 0)
-                  return (
-                    <TableRow key={f.id}>
-                      <TableCell>
-                        <div>
-                          <p className="font-medium">{f.user?.firstName} {f.user?.lastName}</p>
-                          <p className="text-xs text-muted-foreground">{f.user?.email}</p>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">{f.department?.abbreviation}</Badge>
-                      </TableCell>
-                      <TableCell>
-                        {specEntries.length === 0 ? (
-                          <span className="text-xs text-muted-foreground italic">No specializations</span>
-                        ) : (
-                          <>
-                            <div className="flex flex-wrap gap-1">
-                              {(expandedRows.has(f.id) ? specEntries : specEntries.slice(0, 3)).map(([title, count]) => {
-                                const info = subjectInfoMap[title]
-                                return (
-                                  <Badge key={title} variant="secondary" className="text-xs">
-                                    {title}: {count} cls
-                                    <span className="ml-1 text-muted-foreground">({(info?.units ?? 0) * count}u)</span>
-                                  </Badge>
-                                )
-                              })}
-                            </div>
-                            <div className="flex items-center gap-2 mt-1">
-                              <p className="text-[10px] text-muted-foreground">
-                                {specEntries.length} {specEntries.length === 1 ? 'subject' : 'subjects'} · {specEntries.reduce((a, [, c]) => a + c, 0)} classes · {totalLoad}u / {f.maxUnitsPerWeek}u
-                              </p>
-                              {specEntries.length > 3 && (
-                                <button
-                                  type="button"
-                                  onClick={() => toggleRow(f.id)}
-                                  className="text-[10px] text-[#1B4332] font-medium hover:underline shrink-0"
-                                >
-                                  {expandedRows.has(f.id) ? 'Show less' : `+${specEntries.length - 3} more`}
-                                </button>
+        /* ── Desktop: department-grouped tables ── */
+        <div className="space-y-5">
+          {grouped.map(({ label, abbr, members }) => (
+            <Card key={label}>
+              {/* Department section header */}
+              <div className="flex items-center gap-3 px-5 py-3 border-b bg-[#1B4332]/5 rounded-t-lg">
+                <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[#1B4332] text-white text-xs font-bold shrink-0">
+                  {abbr.slice(0, 2)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-[#1B4332]">{label}</p>
+                  <p className="text-[11px] text-muted-foreground">{members.length} {members.length === 1 ? "member" : "members"}</p>
+                </div>
+              </div>
+              <CardContent className="p-0 overflow-x-auto">
+                <Table className="min-w-[700px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Specializations & Load</TableHead>
+                      <TableHead>Max Units</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="w-10" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {members.map((f: any) => {
+                      const counts = buildSectionCounts(f)
+                      const totalLoad = calcLoadFromCounts(counts)
+                      const specEntries = Object.entries(counts).filter(([, c]) => c > 0)
+                      return (
+                        <TableRow key={f.id}>
+                          <TableCell>
+                            <div>
+                              <p className="font-medium">{f.user?.firstName} {f.user?.lastName}</p>
+                              {f.user?.email && !f.user.email.endsWith("@faculty.slsu.edu.ph") && (
+                                <p className="text-xs text-muted-foreground">{f.user.email}</p>
                               )}
                             </div>
-                          </>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-sm">{f.maxUnitsPerWeek}u/wk</TableCell>
-                      <TableCell>
-                        <Badge variant={f.isActive ? "default" : "secondary"}>
-                          {f.isActive ? "Active" : "Inactive"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8" />}>
-                            <MoreHorizontal className="h-4 w-4" />
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onClick={() => openEdit(f)}>
-                              <Briefcase className="mr-2 h-4 w-4" />Edit Faculty
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+                          </TableCell>
+                          <TableCell>
+                            {specEntries.length === 0 ? (
+                              <span className="text-xs text-muted-foreground italic">No specializations</span>
+                            ) : (
+                              <>
+                                <div className="flex flex-wrap gap-1">
+                                  {(expandedRows.has(f.id) ? specEntries : specEntries.slice(0, 3)).map(([title, count]) => {
+                                    const info = subjectInfoMap[title]
+                                    return (
+                                      <Badge key={title} variant="secondary" className="text-xs">
+                                        {title}: {count} cls
+                                        <span className="ml-1 text-muted-foreground">({(info?.units ?? 0) * count}u)</span>
+                                      </Badge>
+                                    )
+                                  })}
+                                </div>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {specEntries.length} {specEntries.length === 1 ? 'subject' : 'subjects'} · {specEntries.reduce((a, [, c]) => a + c, 0)} classes · {totalLoad}u / {f.maxUnitsPerWeek}u
+                                  </p>
+                                  {specEntries.length > 3 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleRow(f.id)}
+                                      className="text-[10px] text-[#1B4332] font-medium hover:underline shrink-0"
+                                    >
+                                      {expandedRows.has(f.id) ? 'Show less' : `+${specEntries.length - 3} more`}
+                                    </button>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-sm">{f.maxUnitsPerWeek}u/wk</TableCell>
+                          <TableCell>
+                            <Badge variant={f.isActive ? "default" : "secondary"}>
+                              {f.isActive ? "Active" : "Inactive"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8" />}>
+                                <MoreHorizontal className="h-4 w-4" />
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem onClick={() => openEdit(f)}>
+                                  <Briefcase className="mr-2 h-4 w-4" />Edit Faculty
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
         )
       )}
 
@@ -683,6 +781,15 @@ export default function FacultyPage() {
                 <Label>Last Name</Label>
                 <Input value={editForm.lastName} onChange={(e) => setEditForm(f => ({ ...f, lastName: e.target.value }))} />
               </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>Email <span className="text-muted-foreground font-normal">(optional — enables magic-link login)</span></Label>
+              <Input
+                type="email"
+                placeholder="faculty@example.com"
+                value={editForm.email}
+                onChange={(e) => setEditForm(f => ({ ...f, email: e.target.value }))}
+              />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="grid gap-2">

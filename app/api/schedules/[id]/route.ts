@@ -34,6 +34,13 @@ export async function GET(
           },
         },
         conflicts: true,
+        unassigned: {
+          include: {
+            subject: { select: { id: true, code: true, title: true, units: true, type: true, year: true } },
+            section: { select: { id: true, name: true, yearLevel: { select: { level: true } } } },
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
     })
 

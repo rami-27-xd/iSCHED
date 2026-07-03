@@ -3,10 +3,21 @@
 import { useState, useMemo, useCallback, useRef } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Card, CardContent } from "@/components/ui/card"
-import { Loader2 } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog"
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Loader2, Plus, MoreHorizontal, Pencil, UserMinus } from "lucide-react"
 import { toast } from "sonner"
-import { useFacultyList } from "@/hooks/use-data"
+import { useFacultyList, useCreateFaculty, useUpdateFaculty, useSemesters } from "@/hooks/use-data"
+import { useCollege } from "@/lib/college-context"
 import { RoleGuard } from "@/components/shared/role-guard"
+import { PageHeader } from "@/components/shared/page-header"
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -79,34 +90,24 @@ function minsToTimeStr(mins: number): string {
 const BRAND_GREEN = "#1B4332"
 const BRAND_GOLD = "#D4AF37"
 
-// ─── Timeline hour labels (for display above the timeline) ────────────────────
-const HOUR_LABELS = (() => {
-  const labels: { time: string; offsetSlots: number }[] = []
-  for (let i = 0; i < SLOTS.length; i++) {
-    const [, m] = SLOTS[i].split(":").map(Number)
-    if (m === 0) {
-      labels.push({ time: SLOTS[i], offsetSlots: i })
-    }
-  }
-  return labels
-})()
-
 // ─── Faculty Card Component ───────────────────────────────────────────────────
 
 function FacultyCard({
   faculty,
   availabilityMap,
   allAvailability,
-  selectedSemesterId,
   onSave,
   isSaving,
+  onEdit,
+  onDeactivate,
 }: {
   faculty: any
   availabilityMap: Map<string, Set<string>>
   allAvailability: any[]
-  selectedSemesterId: string
   onSave: (facultyId: string, newSlots: { day: string; startTime: string; endTime: string }[]) => void
   isSaving: boolean
+  onEdit?: (faculty: any) => void
+  onDeactivate?: (faculty: any) => void
 }) {
   const [activeDay, setActiveDay] = useState<string>("MONDAY")
   const dragRef = useRef<{ dragging: boolean; startIdx: number; endIdx: number; mode: "add" | "remove" } | null>(null)
@@ -125,7 +126,6 @@ function FacultyCard({
     for (const day of DAYS) {
       const daySlots = SLOTS.filter((s) => facultySlots.has(`${day}-${s}`))
       if (daySlots.length === 0) continue
-      // Group into contiguous ranges
       const ranges: string[] = []
       let rangeStart = daySlots[0]
       let prevIdx = SLOTS.indexOf(daySlots[0])
@@ -146,14 +146,12 @@ function FacultyCard({
   // ─── Compute new slots after a bulk change for one day ────────────────
   const buildNewSlots = useCallback(
     (day: string, selectedIndices: Set<number>) => {
-      // Keep all slots from other days
       const currentSlots = allAvailability
         .filter((a: any) => a.facultyId === faculty.id)
         .map((a: any) => ({ day: a.day, startTime: a.startTime, endTime: a.endTime }))
 
       const otherDaySlots = currentSlots.filter((s) => s.day !== day)
 
-      // Build merged intervals from selected indices
       const intervals: [number, number][] = []
       for (const idx of selectedIndices) {
         const [h, m] = SLOTS[idx].split(":").map(Number)
@@ -213,7 +211,6 @@ function FacultyCard({
     const lo = Math.min(startIdx, endIdx)
     const hi = Math.max(startIdx, endIdx)
 
-    // Build new set of selected indices for this day
     const currentSelected = new Set<number>()
     for (let i = 0; i < SLOTS.length; i++) {
       if (facultySlots.has(`${activeDay}-${SLOTS[i]}`)) {
@@ -264,7 +261,6 @@ function FacultyCard({
     commitDaySlots(activeDay, new Set())
   }, [activeDay, commitDaySlots])
 
-  // ─── Check which indices are in the drag preview ──────────────────────
   const getDragRange = (): Set<number> => {
     if (!dragPreview) return new Set()
     const lo = Math.min(dragPreview.startIdx, dragPreview.endIdx)
@@ -280,14 +276,46 @@ function FacultyCard({
     <Card className="overflow-hidden">
       {/* Header */}
       <div
-        className="px-4 py-3 text-white"
+        className="flex items-center justify-between px-4 py-3 text-white"
         style={{ backgroundColor: BRAND_GREEN }}
       >
-        <h3 className="font-semibold text-base">{fullName}</h3>
-        {department && (
-          <p className="text-xs mt-0.5" style={{ color: BRAND_GOLD }}>
-            {department}
-          </p>
+        <div className="min-w-0">
+          <h3 className="font-semibold text-base truncate">{fullName}</h3>
+          {department && (
+            <p className="text-xs mt-0.5 truncate" style={{ color: BRAND_GOLD }}>
+              {department}
+            </p>
+          )}
+        </div>
+        {(onEdit || onDeactivate) && (
+          <DropdownMenu>
+            <DropdownMenuTrigger render={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 ml-2 text-white/70 hover:text-white hover:bg-white/15"
+              />
+            }>
+              <MoreHorizontal className="h-4 w-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {onEdit && (
+                <DropdownMenuItem onClick={() => onEdit(faculty)}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit Record
+                </DropdownMenuItem>
+              )}
+              {onDeactivate && (
+                <DropdownMenuItem
+                  onClick={() => onDeactivate(faculty)}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <UserMinus className="mr-2 h-4 w-4" />
+                  Deactivate
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
 
@@ -330,7 +358,7 @@ function FacultyCard({
             className="px-3 py-1.5 text-xs font-medium rounded-md border transition-colors hover:opacity-80 disabled:opacity-50"
             style={{ borderColor: BRAND_GREEN, color: BRAND_GREEN }}
           >
-            Morning (7:30-12:00)
+            Morning (7:30–12:00)
           </button>
           <button
             type="button"
@@ -339,7 +367,7 @@ function FacultyCard({
             className="px-3 py-1.5 text-xs font-medium rounded-md border transition-colors hover:opacity-80 disabled:opacity-50"
             style={{ borderColor: BRAND_GREEN, color: BRAND_GREEN }}
           >
-            Afternoon (12:00-5:00)
+            Afternoon (12:00–5:00)
           </button>
           <button
             type="button"
@@ -348,7 +376,7 @@ function FacultyCard({
             className="px-3 py-1.5 text-xs font-medium rounded-md border transition-colors hover:opacity-80 disabled:opacity-50"
             style={{ borderColor: BRAND_GREEN, color: BRAND_GREEN }}
           >
-            Full Day (7:30-9:00 PM)
+            Full Day (7:30–9:00 PM)
           </button>
           <button
             type="button"
@@ -360,77 +388,77 @@ function FacultyCard({
           </button>
         </div>
 
-        {/* Hour labels — scrollable on mobile */}
+        {/* Timeline */}
         <div className="relative select-none overflow-x-auto" style={{ userSelect: "none" }}>
           <div className="min-w-[600px]">
-          <div className="flex text-[10px] text-muted-foreground mb-0.5 pl-0">
-            {SLOTS.map((slot, i) => {
-              const [, m] = slot.split(":").map(Number)
-              return (
-                <div
-                  key={i}
-                  className="text-center"
-                  style={{ width: `${100 / SLOTS.length}%`, minWidth: 0 }}
-                >
-                  {m === 0 ? formatTime12(slot).replace(":00 ", "").replace(" ", "") : ""}
-                </div>
-              )
-            })}
+            {/* Hour labels */}
+            <div className="flex text-[10px] text-muted-foreground mb-0.5 pl-0">
+              {SLOTS.map((slot, i) => {
+                const [, m] = slot.split(":").map(Number)
+                return (
+                  <div
+                    key={i}
+                    className="text-center"
+                    style={{ width: `${100 / SLOTS.length}%`, minWidth: 0 }}
+                  >
+                    {m === 0 ? formatTime12(slot).replace(":00 ", "").replace(" ", "") : ""}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Timeline slots */}
+            <div
+              className="flex rounded-lg overflow-hidden border border-border"
+              onMouseLeave={() => {
+                if (dragRef.current?.dragging) handleMouseUp()
+              }}
+            >
+              {SLOTS.map((slot, idx) => {
+                const key = `${activeDay}-${slot}`
+                const isAvailable = facultySlots.has(key)
+                const isInDrag = dragRange.has(idx)
+
+                let bgColor: string
+                if (isInDrag) {
+                  bgColor = dragPreview?.mode === "add" ? "rgba(34,197,94,0.5)" : "rgba(239,68,68,0.3)"
+                } else if (isAvailable) {
+                  bgColor = "rgba(34,197,94,0.6)"
+                } else {
+                  bgColor = "transparent"
+                }
+
+                const [, m] = slot.split(":").map(Number)
+                const isHourBoundary = m === 0 && idx > 0
+
+                return (
+                  <div
+                    key={idx}
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      handleMouseDown(idx)
+                    }}
+                    onMouseEnter={() => handleMouseEnter(idx)}
+                    onMouseUp={handleMouseUp}
+                    className="relative cursor-pointer transition-all hover:brightness-90 hover:scale-y-110 active:scale-y-95"
+                    style={{
+                      width: `${100 / SLOTS.length}%`,
+                      height: "44px",
+                      backgroundColor: bgColor,
+                      borderLeft: isHourBoundary ? "1px solid rgba(0,0,0,0.12)" : "1px solid rgba(0,0,0,0.04)",
+                    }}
+                    title={`${DAY_LABELS[activeDay]} ${formatTime12(slot)} – ${formatTime12(getEndTime(slot))} ${isAvailable ? "(Available)" : "(Unavailable)"}`}
+                  />
+                )
+              })}
+            </div>
+
+            {/* Start/End labels */}
+            <div className="flex justify-between text-[10px] text-muted-foreground mt-0.5 px-0.5">
+              <span>{formatTime12(SLOTS[0])}</span>
+              <span>{formatTime12(getEndTime(SLOTS[SLOTS.length - 1]))}</span>
+            </div>
           </div>
-
-          {/* Timeline slots */}
-          <div
-            className="flex rounded-lg overflow-hidden border border-border"
-            onMouseLeave={() => {
-              if (dragRef.current?.dragging) handleMouseUp()
-            }}
-          >
-            {SLOTS.map((slot, idx) => {
-              const key = `${activeDay}-${slot}`
-              const isAvailable = facultySlots.has(key)
-              const isInDrag = dragRange.has(idx)
-
-              let bgColor: string
-              if (isInDrag) {
-                bgColor = dragPreview?.mode === "add" ? "rgba(34,197,94,0.5)" : "rgba(239,68,68,0.3)"
-              } else if (isAvailable) {
-                bgColor = "rgba(34,197,94,0.6)"
-              } else {
-                bgColor = "transparent"
-              }
-
-              // Visual separator at hour boundaries
-              const [, m] = slot.split(":").map(Number)
-              const isHourBoundary = m === 0 && idx > 0
-
-              return (
-                <div
-                  key={idx}
-                  onMouseDown={(e) => {
-                    e.preventDefault()
-                    handleMouseDown(idx)
-                  }}
-                  onMouseEnter={() => handleMouseEnter(idx)}
-                  onMouseUp={handleMouseUp}
-                  className="relative cursor-pointer transition-all hover:brightness-90 hover:scale-y-110 active:scale-y-95"
-                  style={{
-                    width: `${100 / SLOTS.length}%`,
-                    height: "44px",
-                    backgroundColor: bgColor,
-                    borderLeft: isHourBoundary ? "1px solid rgba(0,0,0,0.12)" : "1px solid rgba(0,0,0,0.04)",
-                  }}
-                  title={`${DAY_LABELS[activeDay]} ${formatTime12(slot)} - ${formatTime12(getEndTime(slot))} ${isAvailable ? "(Available)" : "(Unavailable)"}`}
-                />
-              )
-            })}
-          </div>
-
-          {/* Start/End labels under timeline */}
-          <div className="flex justify-between text-[10px] text-muted-foreground mt-0.5 px-0.5">
-            <span>{formatTime12(SLOTS[0])}</span>
-            <span>{formatTime12(getEndTime(SLOTS[SLOTS.length - 1]))}</span>
-          </div>
-          </div>{/* end min-w wrapper */}
         </div>
 
         {/* Summary */}
@@ -447,45 +475,84 @@ function FacultyCard({
 
 export default function AvailabilityPage() {
   const queryClient = useQueryClient()
-  const { data: faculty = [], isLoading: loadingFaculty } = useFacultyList()
-  // Fetch semesters from active schedules so availability aligns with manage schedules
-  const { data: activeSchedules = [] } = useQuery({
-    queryKey: ["schedules", { isArchived: false }],
+
+  // ── Data ──
+  const { selectedCollegeId } = useCollege()
+
+  // Fetch current user first so we can scope the faculty query correctly
+  const { data: currentUser } = useQuery({
+    queryKey: ["current-user-me"],
     queryFn: async () => {
-      const res = await fetch("/api/schedules")
+      const res = await fetch("/api/users/me")
       const json = await res.json()
-      if (!res.ok) return []
-      return json.data ?? []
+      return json.data ?? null
     },
   })
-  // Extract unique semesters from active schedules
-  const semesters = useMemo(() => {
-    const map = new Map<string, any>()
-    activeSchedules.forEach((s: any) => {
-      if (s.semester && !map.has(s.semester.id)) {
-        map.set(s.semester.id, s.semester)
-      }
-    })
-    return Array.from(map.values())
-  }, [activeSchedules])
+  const isAdminUser = currentUser?.role === "ADMIN"
+  const userDeptId: string | undefined = currentUser?.departmentId ?? undefined
 
-  const [selectedSemesterId, setSelectedSemesterId] = useState<string>("")
+  // ADMIN sees only their own department's faculty; SUPER_ADMIN follows college filter
+  const { data: faculty = [], isLoading: loadingFaculty } = useFacultyList(
+    isAdminUser
+      ? (userDeptId ? { departmentId: userDeptId } : undefined)
+      : (selectedCollegeId ? { collegeId: selectedCollegeId } : undefined)
+  )
+  const createFaculty = useCreateFaculty()
+  const updateFaculty = useUpdateFaculty()
+
+  // ── Semesters ──
+  const { data: semesters = [], isLoading: loadingSemesters } = useSemesters()
+
+  // User-selected semester (dropdown). Empty = follow the active/most-recent one.
+  const [selectedSemesterId, setSelectedSemesterId] = useState("")
+
+  // Prefer the user's dropdown choice; else the explicitly-active semester;
+  // else the most recent one so the page always works.
+  const activeSemester = useMemo(() => {
+    const sems = semesters as any[]
+    if (selectedSemesterId) {
+      const chosen = sems.find((s) => s.id === selectedSemesterId)
+      if (chosen) return chosen
+    }
+    return sems.find((s) => s.isActive) ?? sems[0] ?? null
+  }, [semesters, selectedSemesterId])
+
+  const activeSemesterId = activeSemester?.id ?? ""
+
+  const semesterLabel = useCallback((s: any) => {
+    const type =
+      s.type === "FIRST" ? "1st"
+      : s.type === "SECOND" ? "2nd"
+      : "Summer"
+    return `${type} Semester — ${s.academicYear?.label ?? ""}`
+  }, [])
+
+  // ── UI state ──
   const [searchQuery, setSearchQuery] = useState("")
 
-  // Fetch ALL faculty availability for the selected semester
+  // Add faculty dialog
+  const [addOpen, setAddOpen] = useState(false)
+  const [addForm, setAddForm] = useState({ firstName: "", lastName: "", email: "", employeeId: "", maxUnitsPerWeek: 21 })
+
+  // Edit faculty dialog
+  const [editOpen, setEditOpen] = useState(false)
+  const [editTarget, setEditTarget] = useState<any>(null)
+  const [editForm, setEditForm] = useState({ firstName: "", lastName: "", maxUnitsPerWeek: 21 })
+
+  // ── Faculty availability data ──
   const { data: allAvailability = [], isLoading: loadingAvailability } = useQuery({
-    queryKey: ["faculty-availability-all", selectedSemesterId],
+    queryKey: ["faculty-availability-all", activeSemesterId],
     queryFn: async () => {
-      if (!selectedSemesterId) return []
-      const res = await fetch(`/api/faculty/availability?semesterId=${selectedSemesterId}`)
+      if (!activeSemesterId) return []
+      const res = await fetch(`/api/faculty/availability?semesterId=${activeSemesterId}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error ?? "Failed to fetch")
       return json.data ?? []
     },
-    enabled: !!selectedSemesterId,
+    enabled: !!activeSemesterId,
   })
 
-  // Build a lookup: facultyId -> Set of "DAY-HH:MM" keys for 30-min slots
+  // Build lookup: facultyId → Set of "DAY-HH:MM" keys
   const availabilityMap = useMemo(() => {
     const map = new Map<string, Set<string>>()
     for (const slot of allAvailability) {
@@ -511,7 +578,7 @@ export default function AvailabilityPage() {
     return map
   }, [allAvailability])
 
-  // Save mutation - accepts full slot list for a faculty
+  // ── Save availability mutation ──
   const saveMutation = useMutation({
     mutationFn: async ({
       facultyId,
@@ -523,18 +590,14 @@ export default function AvailabilityPage() {
       const res = await fetch("/api/faculty/availability", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          facultyId,
-          semesterId: selectedSemesterId,
-          slots,
-        }),
+        body: JSON.stringify({ facultyId, semesterId: activeSemesterId, slots }),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error ?? "Failed to save")
       return json.data
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["faculty-availability-all", selectedSemesterId] })
+      queryClient.invalidateQueries({ queryKey: ["faculty-availability-all", activeSemesterId] })
     },
     onError: (err: Error) => toast.error(err.message),
   })
@@ -546,20 +609,88 @@ export default function AvailabilityPage() {
     [saveMutation],
   )
 
-  const isLoading = loadingFaculty || loadingAvailability
+  // ── Add faculty handler ──
+  async function handleAddFaculty() {
+    const { firstName, lastName, email, employeeId, maxUnitsPerWeek } = addForm
+    if (!firstName.trim()) return toast.error("First name is required")
+    if (!lastName.trim()) return toast.error("Last name is required")
+
+    const departmentId = currentUser?.department?.id ?? currentUser?.departmentId
+    if (!departmentId) return toast.error("No department found for your account")
+
+    try {
+      await createFaculty.mutateAsync({
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        ...(email.trim() ? { email: email.trim().toLowerCase() } : {}),
+        ...(employeeId.trim() ? { employeeId: employeeId.trim() } : {}),
+        departmentId,
+        maxUnitsPerWeek,
+      })
+      setAddOpen(false)
+      setAddForm({ firstName: "", lastName: "", email: "", employeeId: "", maxUnitsPerWeek: 21 })
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+  }
+
+  // ── Edit faculty handlers ──
+  function openEdit(f: any) {
+    setEditTarget(f)
+    setEditForm({
+      firstName: f.user?.firstName ?? "",
+      lastName: f.user?.lastName ?? "",
+      maxUnitsPerWeek: f.maxUnitsPerWeek ?? 21,
+    })
+    setEditOpen(true)
+  }
+
+  async function handleUpdateFaculty() {
+    if (!editTarget) return
+    if (!editForm.firstName.trim()) return toast.error("First name is required")
+    if (!editForm.lastName.trim()) return toast.error("Last name is required")
+
+    try {
+      await updateFaculty.mutateAsync({
+        id: editTarget.id,
+        firstName: editForm.firstName.trim(),
+        lastName: editForm.lastName.trim(),
+        maxUnitsPerWeek: editForm.maxUnitsPerWeek,
+      })
+      setEditOpen(false)
+      setEditTarget(null)
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+  }
+
+  // ── Deactivate handler ──
+  async function handleDeactivate(f: any) {
+    const name = `${f.user?.firstName ?? ""} ${f.user?.lastName ?? ""}`.trim()
+    if (!window.confirm(`Deactivate ${name}? They will no longer appear in faculty lists.`)) return
+    try {
+      await updateFaculty.mutateAsync({ id: f.id, isActive: false })
+      toast.success(`${name} has been deactivated`)
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+  }
+
+  const isLoading = loadingFaculty || loadingAvailability || loadingSemesters
 
   return (
     <RoleGuard allowedRoles={["SUPER_ADMIN", "ADMIN"]}>
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight" style={{ color: BRAND_GREEN }}>
-          Faculty Availability
-        </h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Drag across time slots to select availability ranges. Use quick buttons for common presets. Changes auto-save.
-        </p>
-      </div>
+
+      {/* Page Header with Add Faculty button */}
+      <PageHeader
+        action={
+          <Button onClick={() => setAddOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" />
+            Add Faculty
+          </Button>
+        }
+      />
 
       {/* Legend */}
       <div className="flex items-center gap-5 text-xs text-muted-foreground">
@@ -576,43 +707,48 @@ export default function AvailabilityPage() {
         </div>
       </div>
 
-      {/* Semester Selector + Search */}
+      {/* Only warn when no semesters exist at all */}
+      {!loadingSemesters && (semesters as any[]).length === 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <strong>No semesters found.</strong>{" "}
+          Add an academic year and semester in Settings before managing faculty availability.
+        </div>
+      )}
+
+      {/* Search */}
       <Card>
         <CardContent className="pt-6">
-          <div className="flex flex-wrap gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-end gap-4">
             <div className="w-full max-w-sm">
+              <label className="block text-sm font-medium mb-1.5">Search Faculty</label>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by name or department..."
+                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
+              />
+            </div>
+            <div className="w-full max-w-xs">
               <label className="block text-sm font-medium mb-1.5">Semester</label>
               <select
-                value={selectedSemesterId}
+                value={activeSemesterId}
                 onChange={(e) => setSelectedSemesterId(e.target.value)}
                 className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               >
-                <option value="">Select semester...</option>
-                {semesters.map((s: any) => (
+                {(semesters as any[]).map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.type === "FIRST" ? "1st" : s.type === "SECOND" ? "2nd" : "Summer"} Semester — {s.academicYear?.label}
+                    {semesterLabel(s)}{s.isActive ? " (Active)" : ""}
                   </option>
                 ))}
               </select>
             </div>
-            {selectedSemesterId && (
-              <div className="w-full max-w-sm">
-                <label className="block text-sm font-medium mb-1.5">Search Faculty</label>
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search by name or department..."
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
-                />
-              </div>
-            )}
           </div>
         </CardContent>
       </Card>
 
       {/* Loading state */}
-      {selectedSemesterId && isLoading && (
+      {isLoading && (
         <div className="flex h-40 items-center justify-center text-muted-foreground text-sm">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           Loading faculty availability...
@@ -620,14 +756,14 @@ export default function AvailabilityPage() {
       )}
 
       {/* No faculty */}
-      {selectedSemesterId && !isLoading && faculty.length === 0 && (
+      {activeSemesterId && !isLoading && faculty.length === 0 && (
         <div className="rounded-lg border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
-          No faculty members found.
+          No faculty members found. Use the <strong>Add Faculty</strong> button to add one.
         </div>
       )}
 
       {/* Faculty cards */}
-      {selectedSemesterId && !isLoading && faculty.length > 0 && (() => {
+      {activeSemesterId && !isLoading && faculty.length > 0 && (() => {
         const q = searchQuery.toLowerCase().trim()
         const filtered = q
           ? (faculty as any[]).filter((f) => {
@@ -648,14 +784,135 @@ export default function AvailabilityPage() {
                 faculty={f}
                 availabilityMap={availabilityMap}
                 allAvailability={allAvailability}
-                selectedSemesterId={selectedSemesterId}
                 onSave={handleSave}
                 isSaving={saveMutation.isPending}
+                onEdit={openEdit}
+                onDeactivate={handleDeactivate}
               />
             ))}
           </div>
         )
       })()}
+
+      {/* ── Add Faculty Dialog ─────────────────────────────────────────── */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Faculty Member</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-2">
+                <Label>First Name <span className="text-destructive">*</span></Label>
+                <Input
+                  placeholder="e.g. Maria"
+                  value={addForm.firstName}
+                  onChange={(e) => setAddForm(f => ({ ...f, firstName: e.target.value }))}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddFaculty()}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label>Last Name <span className="text-destructive">*</span></Label>
+                <Input
+                  placeholder="e.g. Santos"
+                  value={addForm.lastName}
+                  onChange={(e) => setAddForm(f => ({ ...f, lastName: e.target.value }))}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddFaculty()}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>
+                Email Address
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">(optional)</span>
+              </Label>
+              <Input
+                type="email"
+                placeholder="e.g. juan.santos@slsu.edu.ph"
+                value={addForm.email}
+                onChange={(e) => setAddForm(f => ({ ...f, email: e.target.value }))}
+              />
+              <p className="text-[11px] text-muted-foreground leading-snug">
+                If provided, the faculty member can sign in with a magic link to view their schedule.
+                Leave blank to create a record-only entry with no login access.
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <Label>
+                Employee ID
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">(optional — auto-generated if blank)</span>
+              </Label>
+              <Input
+                placeholder="e.g. FAC-2024-001"
+                value={addForm.employeeId}
+                onChange={(e) => setAddForm(f => ({ ...f, employeeId: e.target.value }))}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Max Units / Week</Label>
+              <Input
+                type="number"
+                min={1}
+                max={40}
+                value={addForm.maxUnitsPerWeek}
+                onChange={(e) => setAddForm(f => ({ ...f, maxUnitsPerWeek: Number(e.target.value) }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button onClick={handleAddFaculty} disabled={createFaculty.isPending}>
+              {createFaculty.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Add Faculty
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Edit Faculty Dialog ────────────────────────────────────────── */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit Faculty Record</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-2">
+                <Label>First Name</Label>
+                <Input
+                  value={editForm.firstName}
+                  onChange={(e) => setEditForm(f => ({ ...f, firstName: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label>Last Name</Label>
+                <Input
+                  value={editForm.lastName}
+                  onChange={(e) => setEditForm(f => ({ ...f, lastName: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>Max Units / Week</Label>
+              <Input
+                type="number"
+                min={1}
+                max={40}
+                value={editForm.maxUnitsPerWeek}
+                onChange={(e) => setEditForm(f => ({ ...f, maxUnitsPerWeek: Number(e.target.value) }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button onClick={handleUpdateFaculty} disabled={updateFaculty.isPending}>
+              {updateFaculty.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
     </div>
     </RoleGuard>
   )

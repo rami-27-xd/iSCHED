@@ -15,15 +15,24 @@ export async function getCurrentUser() {
   const user = await getAuthenticatedUser()
   if (!user) return null
 
-  return db.user.findUnique({
-    where: { supabaseId: user.id },
-    include: {
-      department: true,
-      faculty: { include: { department: true } },
-      departmentChair: { include: { department: true } },
-      programHead: { include: { program: { include: { department: true } } } },
-    },
-  })
+  const include = {
+    department: { include: { college: true } },
+    faculty: { include: { department: { include: { college: true } } } },
+    departmentChair: { include: { department: { include: { college: true } } } },
+    programHead: { include: { program: { include: { department: { include: { college: true } } } } } },
+  }
+
+  const existing = await db.user.findUnique({ where: { supabaseId: user.id }, include })
+  if (existing) return existing
+
+  // Self-heal: Supabase auth user exists but DB record is missing (e.g. callback was
+  // missed during email confirmation). Create the record now so the user isn't locked out.
+  try {
+    await ensureDbUser(user)
+    return db.user.findUnique({ where: { supabaseId: user.id }, include })
+  } catch {
+    return null
+  }
 }
 
 /** Get the department ID for the current user based on their role */
@@ -49,7 +58,9 @@ export function getUserDepartmentId(dbUser: any): string | null {
 }
 
 export async function ensureDbUser(supabaseUser: SupabaseUser) {
-  const existing = await db.user.findUnique({
+  // Primary lookup by supabaseId, fallback to email to handle project migrations
+  // and prevent duplicate records when supabaseId changes between Supabase projects.
+  let existing = await db.user.findUnique({
     where: { supabaseId: supabaseUser.id },
     include: {
       department: true,
@@ -58,6 +69,32 @@ export async function ensureDbUser(supabaseUser: SupabaseUser) {
       programHead: { include: { program: { include: { department: true } } } },
     },
   })
+
+  // Fallback: find by email if supabaseId doesn't match (e.g. after Supabase project switch)
+  if (!existing && supabaseUser.email) {
+    const byEmail = await db.user.findUnique({
+      where: { email: supabaseUser.email },
+      include: {
+        department: true,
+        faculty: { include: { department: true } },
+        departmentChair: { include: { department: true } },
+        programHead: { include: { program: { include: { department: true } } } },
+      },
+    })
+    if (byEmail) {
+      // Sync the supabaseId to the current auth user so future lookups work correctly
+      existing = await db.user.update({
+        where: { email: supabaseUser.email },
+        data: { supabaseId: supabaseUser.id },
+        include: {
+          department: true,
+          faculty: { include: { department: true } },
+          departmentChair: { include: { department: true } },
+          programHead: { include: { program: { include: { department: true } } } },
+        },
+      })
+    }
+  }
 
   if (existing) {
     // If user is not yet approved, check if they should be auto-approved or role-updated
@@ -119,7 +156,7 @@ export async function ensureDbUser(supabaseUser: SupabaseUser) {
   const newUser = await db.user.create({
     data: {
       supabaseId: supabaseUser.id,
-      email: supabaseUser.email ?? '',
+      email: supabaseUser.email ?? null,
       firstName,
       lastName,
       role,

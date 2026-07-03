@@ -3,21 +3,25 @@
 import { useState, useEffect } from "react"
 import { useSearchParams } from "next/navigation"
 import { useQuery, useMutation } from "@tanstack/react-query"
+import { useTheme } from "next-themes"
 import { PageHeader } from "@/components/shared/page-header"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { User, Key, Loader2, Building2 } from "lucide-react"
+import { User, Key, Loader2, Building2, Sun, Moon, Palette } from "lucide-react"
 import { toast } from "sonner"
 import { createClient } from "@/lib/supabase/client"
 import { useDepartments } from "@/hooks/use-data"
 
 export default function SettingsPage() {
   const searchParams = useSearchParams()
-  const defaultTab = searchParams.get("tab") === "password" ? "password" : "profile"
+  const defaultTab = searchParams.get("tab") === "password" ? "password"
+    : searchParams.get("tab") === "appearance" ? "appearance"
+    : "profile"
   const [tab, setTab] = useState(defaultTab)
+  const { theme, setTheme } = useTheme()
 
   const [profileForm, setProfileForm] = useState({ firstName: "", lastName: "", email: "" })
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" })
@@ -85,8 +89,6 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Settings" description="Manage your profile and account settings" />
-
       <Tabs value={tab} onValueChange={(v) => v && setTab(v)} className="max-w-2xl">
         <TabsList>
           <TabsTrigger value="profile">
@@ -96,6 +98,10 @@ export default function SettingsPage() {
           <TabsTrigger value="password">
             <Key className="mr-1.5 h-3.5 w-3.5" />
             Change Password
+          </TabsTrigger>
+          <TabsTrigger value="appearance">
+            <Palette className="mr-1.5 h-3.5 w-3.5" />
+            Appearance
           </TabsTrigger>
         </TabsList>
 
@@ -155,9 +161,22 @@ export default function SettingsPage() {
                           className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                         >
                           <option value="">Not assigned</option>
-                          {(departments as any[]).map((d: any) => (
-                            <option key={d.id} value={d.id}>{d.name}</option>
-                          ))}
+                          {(() => {
+                            // Group departments by college for visual hierarchy
+                            const byCollege: Record<string, { label: string; depts: any[] }> = {}
+                            for (const d of departments as any[]) {
+                              const key = d.college?.abbreviation ?? "Other"
+                              if (!byCollege[key]) byCollege[key] = { label: d.college?.name ?? "Other", depts: [] }
+                              byCollege[key].depts.push(d)
+                            }
+                            return Object.entries(byCollege).map(([abbr, group]) => (
+                              <optgroup key={abbr} label={`${abbr} — ${group.label}`}>
+                                {group.depts.map((d: any) => (
+                                  <option key={d.id} value={d.id}>{d.name}</option>
+                                ))}
+                              </optgroup>
+                            ))
+                          })()}
                         </select>
                         <p className="text-xs text-muted-foreground">As Department Chair, you can change your department assignment.</p>
                       </>
@@ -223,6 +242,68 @@ export default function SettingsPage() {
                 <Button onClick={handleChangePassword}>
                   Change Password
                 </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="appearance" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Appearance</CardTitle>
+              <CardDescription>Customize how iSched looks on your device</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Theme toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Theme</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Choose between light and dark mode</p>
+                </div>
+                <div className="flex overflow-hidden rounded-lg border border-input">
+                  <button
+                    type="button"
+                    onClick={() => setTheme("light")}
+                    className={`flex items-center gap-2 px-4 py-2 text-sm transition-colors ${
+                      theme === "light"
+                        ? "bg-[#1B4332] text-white"
+                        : "bg-background text-foreground hover:bg-muted"
+                    }`}
+                  >
+                    <Sun className="h-4 w-4" />
+                    Light
+                  </button>
+                  <div className="w-px bg-input" />
+                  <button
+                    type="button"
+                    onClick={() => setTheme("dark")}
+                    className={`flex items-center gap-2 px-4 py-2 text-sm transition-colors ${
+                      theme === "dark"
+                        ? "bg-[#1B4332] text-white"
+                        : "bg-background text-foreground hover:bg-muted"
+                    }`}
+                  >
+                    <Moon className="h-4 w-4" />
+                    Dark
+                  </button>
+                </div>
+              </div>
+
+              {/* Preview swatch */}
+              <div className="rounded-lg border border-border p-4 space-y-2">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Preview</p>
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-lg bg-[#1B4332] flex items-center justify-center">
+                    <span className="text-xs text-white font-bold">iS</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold">iSched</p>
+                    <p className="text-xs text-muted-foreground">
+                      {theme === "dark" ? "Dark mode is active" : "Light mode is active"}
+                    </p>
+                  </div>
+                  <div className="h-6 w-6 rounded-full bg-primary" />
+                </div>
               </div>
             </CardContent>
           </Card>

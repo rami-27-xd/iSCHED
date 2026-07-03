@@ -12,9 +12,10 @@ import {
 } from '@/components/ui/sheet'
 import { Sidebar, type SidebarProps } from '@/components/layout/sidebar'
 import { Topbar } from '@/components/layout/topbar'
+import { CollegeProvider } from '@/lib/college-context'
 
 // ── User role context ─────────────────────────────────────────────────────
-const UserRoleContext = React.createContext<string>("FACULTY")
+const UserRoleContext = React.createContext<string>('FACULTY')
 export function useUserRole() { return React.useContext(UserRoleContext) }
 
 export interface DashboardShellProps {
@@ -22,6 +23,8 @@ export interface DashboardShellProps {
   userRole: string
   userName?: string
   userEmail?: string
+  /** College the logged-in user belongs to (null = all, for SUPER_ADMIN). */
+  defaultCollegeId?: string | null
 }
 
 const PAGE_TITLES: Record<string, string> = {
@@ -29,7 +32,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/dashboard/schedules': 'Manage Schedules',
   '/dashboard/availability': 'Faculty Availability',
   '/dashboard/faculty': 'Faculty',
-  '/dashboard/rooms': 'Buildings',
+  '/dashboard/rooms': 'Buildings & Labs',
   '/dashboard/subjects': 'Departments',
   '/dashboard/my-schedule': 'My Schedule',
   '/dashboard/analytics': 'Analytics',
@@ -37,7 +40,13 @@ const PAGE_TITLES: Record<string, string> = {
   '/dashboard/settings': 'Settings',
 }
 
-export function DashboardShell({ children, userRole, userName, userEmail }: DashboardShellProps) {
+export function DashboardShell({
+  children,
+  userRole,
+  userName,
+  userEmail,
+  defaultCollegeId,
+}: DashboardShellProps) {
   const [mobileOpen, setMobileOpen] = React.useState(false)
   const [collapsed, setCollapsed] = React.useState(false)
   const pathname = usePathname()
@@ -49,51 +58,54 @@ export function DashboardShell({ children, userRole, userName, userEmail }: Dash
 
   return (
     <UserRoleContext.Provider value={userRole}>
-      <div className="flex h-screen overflow-hidden bg-background">
+      <CollegeProvider userRole={userRole} defaultCollegeId={defaultCollegeId}>
+        <div className="flex h-screen overflow-hidden bg-background">
 
-        {/* Desktop sidebar — collapsible */}
-        <aside
-          className={`hidden lg:flex lg:shrink-0 lg:flex-col bg-sidebar transition-all duration-200 ${
-            collapsed ? 'lg:w-16' : 'lg:w-64'
-          }`}
-        >
-          <Sidebar
-            {...sidebarProps}
-            collapsed={collapsed}
-            onToggleCollapse={() => setCollapsed(v => !v)}
-          />
-        </aside>
+          {/* Desktop sidebar — collapsible */}
+          <aside
+            className={`hidden lg:flex lg:shrink-0 lg:flex-col bg-sidebar transition-all duration-200 ${
+              collapsed ? 'lg:w-16' : 'lg:w-64'
+            }`}
+          >
+            <Sidebar
+              {...sidebarProps}
+              collapsed={collapsed}
+              onToggleCollapse={() => setCollapsed(v => !v)}
+            />
+          </aside>
 
-        {/* Main content */}
-        <div className="flex flex-1 flex-col overflow-hidden min-w-0">
-          <Topbar
-            title={title}
-            userName={userName}
-            userEmail={userEmail}
-            leading={
-              <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-                <SheetTrigger
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="lg:hidden"
-                      aria-label="Open navigation"
-                    />
-                  }
-                >
-                  <Menu className="size-5" />
-                </SheetTrigger>
-                <SheetContent side="left" className="w-64 p-0 bg-sidebar border-sidebar-border">
-                  <SheetTitle className="sr-only">Navigation menu</SheetTitle>
-                  <Sidebar {...sidebarProps} />
-                </SheetContent>
-              </Sheet>
-            }
-          />
-          <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>
+          {/* Main content */}
+          <div className="flex flex-1 flex-col overflow-hidden min-w-0">
+            <Topbar
+              title={title}
+              userName={userName}
+              userEmail={userEmail}
+              userRole={userRole}
+              leading={
+                <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+                  <SheetTrigger
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="lg:hidden"
+                        aria-label="Open navigation"
+                      />
+                    }
+                  >
+                    <Menu className="size-5" />
+                  </SheetTrigger>
+                  <SheetContent side="left" className="w-64 p-0 bg-sidebar border-sidebar-border">
+                    <SheetTitle className="sr-only">Navigation menu</SheetTitle>
+                    <Sidebar {...sidebarProps} />
+                  </SheetContent>
+                </Sheet>
+              }
+            />
+            <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>
+          </div>
         </div>
-      </div>
+      </CollegeProvider>
     </UserRoleContext.Provider>
   )
 }

@@ -136,6 +136,17 @@ export function ScheduleCalendar({ entries, onEntryClick, onEditEntry, semesterS
     }, 100)
   }, [])
 
+  // Snap validRange.start back to the Monday of the semester's first week so
+  // Mon/Tue are never clipped when the semester starts mid-week (e.g. Wed Jun 3).
+  const calendarValidStart = useMemo(() => {
+    if (!semesterStartDate) return undefined
+    const d = new Date(semesterStartDate + "T00:00:00")
+    const dow = d.getDay() // 0=Sun … 6=Sat
+    const daysBack = dow === 0 ? 6 : dow - 1 // shift to Monday
+    d.setDate(d.getDate() - daysBack)
+    return d.toISOString().split("T")[0]
+  }, [semesterStartDate])
+
   // Count entries by type for legend
   const lectureCount = entries.filter(e => e.type === "LECTURE").length
   const labCount = entries.filter(e => e.type === "LABORATORY").length
@@ -354,9 +365,10 @@ export function ScheduleCalendar({ entries, onEntryClick, onEditEntry, semesterS
           nowIndicator={true}
           dayHeaderFormat={{ weekday: "long" }}
           {...(semesterStartDate ? { initialDate: semesterStartDate } : {})}
-          {...(semesterStartDate && semesterEndDate ? { validRange: { start: semesterStartDate, end: semesterEndDate } } : {})}
+          {...(calendarValidStart && semesterEndDate ? { validRange: { start: calendarValidStart, end: semesterEndDate } } : {})}
           events={events}
           editable={false}
+          selectable={true}
           eventContent={renderEventContent}
           eventClick={(info) => {
             const entry = info.event.extendedProps as ScheduleEntry

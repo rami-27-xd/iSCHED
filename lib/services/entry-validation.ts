@@ -38,9 +38,15 @@ export async function validateEntry(
     return "Start time must be before end time"
   }
 
-  // Fetch all needed data in parallel
-  const [existingEntries, schedule, faculty, subject, section] = await Promise.all([
-    // Existing entries for overlap checks
+  // Step 1: Fetch the schedule to get semesterId (needed for cross-schedule checks)
+  const schedule = await db.schedule.findUnique({
+    where: { id: scheduleId },
+    select: { semesterId: true },
+  })
+
+  // Step 2: Parallel fetch using semesterId
+  const [sameScheduleEntries, crossScheduleEntries, faculty, subject, section] = await Promise.all([
+    // Entries within THIS schedule — used for section-overlap checks
     db.scheduleEntry.findMany({
       where: {
         scheduleId,
@@ -60,11 +66,30 @@ export async function validateEntry(
         section: { select: { name: true } },
       },
     }),
-    // Schedule for semester ID
-    db.schedule.findUnique({
-      where: { id: scheduleId },
-      select: { semesterId: true },
-    }),
+    // ALL entries across non-archived schedules in the same semester —
+    // used for room and faculty overlap checks to catch cross-department double-bookings.
+    schedule?.semesterId
+      ? db.scheduleEntry.findMany({
+          where: {
+            scheduleId: { not: scheduleId },
+            schedule: { semesterId: schedule.semesterId, isArchived: false },
+            ...(excludeEntryId ? { id: { not: excludeEntryId } } : {}),
+          },
+          select: {
+            facultyId: true,
+            roomId: true,
+            sectionId: true,
+            day: true,
+            startTime: true,
+            endTime: true,
+            set: true,
+            subject: { select: { code: true, type: true } },
+            faculty: { select: { user: { select: { firstName: true, lastName: true } } } },
+            room: { select: { code: true } },
+            section: { select: { name: true } },
+          },
+        })
+      : Promise.resolve([]),
     // Faculty — check active status and specializations
     db.faculty.findUnique({
       where: { id: entry.facultyId },
@@ -92,14 +117,19 @@ export async function validateEntry(
     }),
   ])
 
+  // Room/faculty checks use ALL entries (same + other schedules).
+  // Section checks use only same-schedule entries (sections appear in one schedule each).
+  const allEntries = [...sameScheduleEntries, ...crossScheduleEntries]
+  const existingEntries = sameScheduleEntries
+
   // 0. Inactive faculty check — either Faculty.isActive or User.isActive must be true
   if (faculty && (faculty.isActive === false || faculty.user?.isActive === false)) {
     const fname = faculty.user ? `${faculty.user.firstName} ${faculty.user.lastName}` : "This faculty member"
     return `${fname} is inactive and cannot be assigned to a schedule entry`
   }
 
-  // 1. Faculty overlap — same faculty, same day, overlapping times
-  const facultyConflict = existingEntries.find(
+  // 1. Faculty overlap — same faculty, same day, overlapping times (checked globally across all schedules)
+  const facultyConflict = allEntries.find(
     (e) =>
       e.facultyId === entry.facultyId &&
       e.day === entry.day &&
@@ -110,8 +140,8 @@ export async function validateEntry(
     return `Faculty conflict: ${fname} is already assigned to "${facultyConflict.subject?.code}" on ${entry.day} (${facultyConflict.startTime}-${facultyConflict.endTime})`
   }
 
-  // 2. Room overlap — same room, same day, overlapping times
-  const roomConflict = existingEntries.find(
+  // 2. Room overlap — same room, same day, overlapping times (checked globally across all schedules)
+  const roomConflict = allEntries.find(
     (e) =>
       e.roomId === entry.roomId &&
       e.day === entry.day &&
@@ -121,8 +151,8 @@ export async function validateEntry(
     return `Room conflict: ${roomConflict.room?.code ?? "Room"} is already booked on ${entry.day} (${roomConflict.startTime}-${roomConflict.endTime}) for "${roomConflict.subject?.code}"`
   }
 
-  // 3. Section overlap — same section, same day, overlapping times
-  // Exception: lab entries with different sets (A vs B) are independent student groups — no conflict
+  // 3. Section overlap — same section, same day, overlapping times (within schedule only —
+  // sections appear in exactly one schedule, so cross-schedule check is unnecessary)
   const sectionConflict = existingEntries.find(
     (e) =>
       e.sectionId === entry.sectionId &&
