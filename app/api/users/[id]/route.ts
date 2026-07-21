@@ -1,20 +1,49 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { requireRole } from '@/lib/auth'
+import { requireRole, getUserDepartmentId } from '@/lib/auth'
 import { apiResponse, apiError, handleApiError } from '@/lib/api-helpers'
 import { createNotification } from '@/lib/notifications'
 
 // PATCH /api/users/[id] — Update user (approve, change role, deactivate)
+// SUPER_ADMIN: full access. ADMIN (Program Chair): may only approve/revoke and
+// activate/deactivate FACULTY accounts in their own department.
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const currentUser = await requireRole('SUPER_ADMIN')
+    const currentUser = await requireRole('SUPER_ADMIN', 'ADMIN')
     const { id } = await params
     const body = await request.json()
 
     const { role, isApproved, isActive, departmentId, programId, clusterId } = body
+
+    if (currentUser.role === 'ADMIN') {
+      // Program Chairs may only touch approval/active flags — never role,
+      // department, program, or cluster assignments.
+      if (role !== undefined || departmentId !== undefined || programId !== undefined || clusterId !== undefined) {
+        return NextResponse.json(
+          apiError('Forbidden — Program Chairs can only approve or deactivate faculty accounts'),
+          { status: 403 }
+        )
+      }
+
+      const target = await db.user.findUnique({
+        where: { id },
+        select: { role: true, departmentId: true },
+      })
+      if (!target) {
+        return NextResponse.json(apiError('User not found'), { status: 404 })
+      }
+
+      const adminDeptId = getUserDepartmentId(currentUser)
+      if (target.role !== 'FACULTY' || !adminDeptId || target.departmentId !== adminDeptId) {
+        return NextResponse.json(
+          apiError('Forbidden — you can only manage faculty accounts in your own department'),
+          { status: 403 }
+        )
+      }
+    }
 
     // Validate role if provided
     const validRoles = ['SUPER_ADMIN', 'ADMIN', 'FACULTY']

@@ -29,7 +29,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
     const { id } = await params
     const body = await req.json()
-    const { name, code, buildingId, type, capacity, equipment, isActive, restrictedDepartmentIds } = body
+    const { name, code, buildingId, type, capacity, equipment, isActive, restrictedDepartmentIds, restrictedProgramIds } = body
 
     const room = await db.room.update({
       where: { id },
@@ -49,8 +49,20 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
               },
             }
           : {}),
+        ...(restrictedProgramIds !== undefined
+          ? {
+              programs: {
+                deleteMany: {},
+                create: (restrictedProgramIds as string[]).map((programId) => ({ programId })),
+              },
+            }
+          : {}),
       },
-      include: { building: true, departments: { include: { department: true } } },
+      include: {
+        building: true,
+        departments: { include: { department: true } },
+        programs: { include: { program: { select: { id: true, name: true, abbreviation: true } } } },
+      },
     })
 
     return NextResponse.json(apiResponse(room))

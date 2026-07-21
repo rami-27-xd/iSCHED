@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 import { validateEntry } from "@/lib/services/entry-validation"
 import { syncFacultySpecializations } from "@/lib/services/sync-specializations"
+import { checkSubjectEditPermission } from "@/lib/services/subject-permissions"
 
 export async function POST(
   req: Request,
@@ -39,6 +40,16 @@ export async function POST(
         apiError("You don't have permission to add entries to this schedule"),
         { status: 403 }
       )
+    }
+
+    // ── Subject ownership check ────────────────────────────────────────────
+    // CAS cluster chairs may only place their own cluster's GEC codes/majors;
+    // Program Chairs may only place their own program's subjects — never GEC.
+    if (body.subjectId) {
+      const permError = await checkSubjectEditPermission(dbUser, body.subjectId)
+      if (permError) {
+        return NextResponse.json(apiError(permError), { status: 403 })
+      }
     }
 
     // ── Building restriction check ─────────────────────────────────────────

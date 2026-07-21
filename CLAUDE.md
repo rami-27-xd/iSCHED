@@ -82,11 +82,29 @@ DRAFT  ──(ADMIN submits)──►  PENDING_APPROVAL  ──(SUPER_ADMIN appr
 - ADMIN generation runs on `DRAFT` status only, no pre-gate on SUPER_ADMIN having run first
 - UI: `components/schedule/workflow-actions.tsx`
 
-### 4. Building Department Restrictions
+### 4. Building & Room Access Restrictions
 - `DepartmentBuilding` junction table: `@@unique([departmentId, buildingId])`
 - Buildings can be restricted to specific departments (zero entries = unrestricted)
 - UI badge on building cards shows the restriction (lock icon + dept abbreviations)
 - API: `GET/POST/PATCH /api/buildings` handles `restrictedDepartmentIds[]`
+- **Room-level**: `DepartmentRoom` (dept access) + `ProgramRoom` (program/course access)
+  - Union semantics: a room is open to a section when it has NO dept AND NO program
+    entries, OR its departments include the section's dept, OR its programs include
+    the section's program
+  - API: `POST /api/rooms` + `PATCH /api/rooms/[id]` handle `restrictedProgramIds[]`
+  - Engine: `RoomInput.allowedProgramIds` — hard constraint in `initializeCandidates`/`rescueTask`
+  - Manual entries: enforced in `lib/services/entry-validation.ts`
+
+### 5. Saturday Restriction (Hard Constraint)
+- **Only CAM (College of Allied Medicine) sections and NSTP subjects may be scheduled on Saturdays**
+- Engine: `SectionInput.allowSaturday` (computed from section → program → dept → college) +
+  NSTP code prefix; Saturday day-patterns are pruned in `getPatternsForTask`
+- Manual entries: blocked in `entry-validation.ts`; NOT force-overridable (entries PATCH route)
+- UI: Add/Edit Entry day dropdowns hide Saturday for non-CAM/non-NSTP sections
+
+### 6. My Schedule Visibility
+- `/api/faculty/my-schedule` returns **PUBLISHED schedules only** for every role —
+  drafts never appear in a personal timetable
 
 ---
 

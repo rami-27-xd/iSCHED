@@ -27,6 +27,11 @@ interface SubjectInput {
   programId?: string | null
   // When set, only rooms whose labSpecialization matches exactly are valid (Hard Constraint).
   requiredLabSpecialization?: string | null
+  // Curriculum-map override: exact sections this subject may be scheduled into.
+  //   undefined/null → fall back to year+programId matching.
+  //   []             → subject is not needed for any section in this run; skip silently.
+  // Used for GEC subjects whose year/semester placement varies per program.
+  allowedSectionIds?: string[] | null
 }
 
 interface FacultyInput {
@@ -55,6 +60,10 @@ interface RoomInput {
   // Populated for LABORATORY / COMPUTER_LAB rooms.
   // Matched against SubjectInput.requiredLabSpecialization (Hard Constraint).
   labSpecialization?: string | null
+  // Program (course) access restriction. Empty/undefined = open to every
+  // section in this run; non-empty = only sections of these programs may be
+  // scheduled here (Hard Constraint).
+  allowedProgramIds?: string[]
 }
 
 interface SectionInput {
@@ -63,6 +72,10 @@ interface SectionInput {
   yearLevel: number
   // The program this section belongs to (via yearLevel.programId).
   programId: string | null
+  // Saturday classes are reserved for CAM (College of Allied Medicine) sections
+  // and NSTP subjects (Hard Constraint). Computed by the caller from the
+  // section's program → department → college.
+  allowSaturday?: boolean
 }
 
 interface SessionSlot {
@@ -298,13 +311,25 @@ export class SchedulingEngine {
     const existingYearLevels = new Set(this.sections.map(s => s.yearLevel))
 
     for (const subject of this.subjects) {
-      // Match sections by year level first, then narrow by program:
-      //   subject.programId set  → only sections in that specific program
-      //   subject.programId null → GEC/shared subject, matches all sections at that year
-      const yearMatched = this.sections.filter(s => s.yearLevel === subject.year)
-      const matchingSections = subject.programId
-        ? yearMatched.filter(s => s.programId === subject.programId)
-        : yearMatched
+      // Curriculum-map override: when allowedSectionIds is provided, it is the
+      // exact pairing (already encodes per-program year + semester placement).
+      // An empty array means no section takes this subject this run — skip
+      // silently rather than queueing it as unassigned.
+      let matchingSections: SectionInput[]
+      if (subject.allowedSectionIds != null) {
+        if (subject.allowedSectionIds.length === 0) continue
+        const allowed = new Set(subject.allowedSectionIds)
+        matchingSections = this.sections.filter(s => allowed.has(s.id))
+        if (matchingSections.length === 0) continue
+      } else {
+        // Default: match sections by year level first, then narrow by program:
+        //   subject.programId set  → only sections in that specific program
+        //   subject.programId null → GEC/shared subject, matches all sections at that year
+        const yearMatched = this.sections.filter(s => s.yearLevel === subject.year)
+        matchingSections = subject.programId
+          ? yearMatched.filter(s => s.programId === subject.programId)
+          : yearMatched
+      }
 
       if (matchingSections.length === 0) {
         const hint = existingYearLevels.size > 0
@@ -513,9 +538,11 @@ export class SchedulingEngine {
           ? allAvail.filter(f => f.id === expectedFacultyId)
           : shuffleInPlace(allAvail))
       : shuffleInPlace(allAvail)
-    const patterns = shuffleInPlace(this.getSessionDayGroups(subject))
+    const patterns = shuffleInPlace(this.getPatternsForTask(subject, section))
     const compatibleRooms = this.rooms.filter(r =>
-      this.checkLabSpecialization(subject.id, r.id) && this.roomTypeCompatible(r, subject)
+      this.checkLabSpecialization(subject.id, r.id) &&
+      this.roomTypeCompatible(r, subject) &&
+      this.roomAllowedForSection(r, section)
     )
 
     for (const fac of allAvailFaculty) {
@@ -643,12 +670,15 @@ export class SchedulingEngine {
       ]
 
       const compatibleRooms = this.rooms.filter(r =>
-        this.checkLabSpecialization(subject.id, r.id) && this.roomTypeCompatible(r, subject)
+        this.checkLabSpecialization(subject.id, r.id) &&
+        this.roomTypeCompatible(r, subject) &&
+        this.roomAllowedForSection(r, section)
       )
 
       // Day-group patterns: labs run as one continuous block on a single day;
       // lectures are distributed across multiple days at the same clock time.
-      const patterns = this.getSessionDayGroups(subject)
+      // Saturday patterns are pruned here unless the task is CAM/NSTP (Hard Constraint).
+      const patterns = this.getPatternsForTask(subject, section)
 
       // Whether to stop as soon as we hit maxPerTask (greedy-only runs don't need diversity).
       const earlyStop = maxPerTask < MAX_CANDIDATES_PER_TASK
@@ -710,6 +740,35 @@ export class SchedulingEngine {
     }
 
     return candidates
+  }
+
+  /**
+   * Hard Constraint — Program (Course) Room Access
+   * A room with allowedProgramIds set may only host sections belonging to one
+   * of those programs. Rooms without the restriction are open to all sections.
+   */
+  private roomAllowedForSection(room: RoomInput, section: SectionInput): boolean {
+    if (!room.allowedProgramIds || room.allowedProgramIds.length === 0) return true
+    return section.programId != null && room.allowedProgramIds.includes(section.programId)
+  }
+
+  /**
+   * Hard Constraint 3 — Saturday Restriction
+   * Only CAM (College of Allied Medicine) sections and NSTP subjects may hold
+   * Saturday classes. All other tasks are restricted to Monday–Friday patterns.
+   */
+  private taskAllowsSaturday(subject: SubjectInput, section: SectionInput): boolean {
+    if (section.allowSaturday === true) return true
+    const code = subject.code.toUpperCase()
+    return code.startsWith('NSTP') || code.startsWith('NST')
+  }
+
+  // Day patterns valid for this (subject, section) pair — drops Saturday patterns
+  // for tasks that are not allowed to run on Saturdays.
+  private getPatternsForTask(subject: SubjectInput, section: SectionInput): { days: DayOfWeek[]; minutesEach: number }[] {
+    const patterns = this.getSessionDayGroups(subject)
+    if (this.taskAllowsSaturday(subject, section)) return patterns
+    return patterns.filter(p => !p.days.includes('SATURDAY'))
   }
 
   private getSessionDayGroups(subject: SubjectInput): { days: DayOfWeek[]; minutesEach: number }[] {

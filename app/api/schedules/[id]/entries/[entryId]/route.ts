@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 import { validateEntry } from "@/lib/services/entry-validation"
 import { syncFacultySpecializations } from "@/lib/services/sync-specializations"
+import { checkSubjectEditPermission } from "@/lib/services/subject-permissions"
 
 export async function PATCH(
   req: Request,
@@ -38,11 +39,21 @@ export async function PATCH(
     //   review/correct Program Chair entries (Phase 2 conflict resolution).
     // - ADMIN: full access on their own DRAFT (Phase 2 major subjects only).
     if (dbUser.role === "SUPER_ADMIN") {
-      // Full access regardless of status
+      // Any status — but subject ownership is checked below
     } else if (dbUser.role === "ADMIN" && schedule.status === "DRAFT") {
-      // Full access on their own DRAFT
+      // Own DRAFT — subject ownership checked below
     } else {
       return NextResponse.json(apiError("You don't have permission to modify this schedule"), { status: 403 })
+    }
+
+    // Subject ownership: check both the entry's current subject and (if changing) the new one
+    const permError =
+      (await checkSubjectEditPermission(dbUser, entry.subjectId)) ??
+      (body.subjectId && body.subjectId !== entry.subjectId
+        ? await checkSubjectEditPermission(dbUser, body.subjectId)
+        : null)
+    if (permError) {
+      return NextResponse.json(apiError(permError), { status: 403 })
     }
 
     // Merge current entry data with updates for validation
@@ -58,8 +69,10 @@ export async function PATCH(
     }
 
     const validationError = await validateEntry(id, merged, entryId)
-    // force: true = soft-validation — save anyway and return warning instead of blocking
-    const force = body.force === true
+    // force: true = soft-validation — save anyway and return warning instead of blocking.
+    // The Saturday restriction (CAM/NSTP only) is a compliance hard constraint and
+    // can never be force-overridden.
+    const force = body.force === true && !validationError?.includes("Saturday classes are reserved")
 
     if (validationError && !force) {
       return NextResponse.json(apiError(validationError), { status: 409 })
@@ -130,14 +143,21 @@ export async function DELETE(
     }
 
     // Permission rules (two-phase workflow):
-    // - SUPER_ADMIN: full delete on any status — for GEC/PATHFIT conflict resolution.
+    // - SUPER_ADMIN: delete on any status — for GEC/PATHFIT conflict resolution.
     // - ADMIN: delete own entries on DRAFT only.
     if (dbUser.role === "SUPER_ADMIN") {
-      // Full access regardless of status
+      // Any status — subject ownership checked below
     } else if (dbUser.role === "ADMIN" && schedule.status === "DRAFT") {
-      // OK — full access on their own DRAFT
+      // OK — subject ownership checked below
     } else {
       return NextResponse.json(apiError("You don't have permission to modify this schedule"), { status: 403 })
+    }
+
+    // Subject ownership: a cluster chair can only delete entries for their own
+    // cluster's GEC codes/majors; a Program Chair only their own program's subjects.
+    const permError = await checkSubjectEditPermission(dbUser, entry.subjectId)
+    if (permError) {
+      return NextResponse.json(apiError(permError), { status: 403 })
     }
 
     await db.scheduleEntry.delete({ where: { id: entryId, scheduleId: id } })

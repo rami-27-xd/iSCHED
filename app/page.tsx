@@ -3,7 +3,6 @@ import { createClient } from "@/lib/supabase/server"
 import Link from "next/link"
 import { Logo } from "@/components/shared/logo"
 import Image from "next/image"
-import { GraduationCap, Users } from "lucide-react"
 
 export default async function Home() {
   const supabase = await createClient()
@@ -59,32 +58,13 @@ export default async function Home() {
           Sign In
         </Link>
 
-        {/* Register buttons */}
-        <div className="mt-4 grid w-full grid-cols-2 gap-3">
-          {/* Faculty */}
-          <Link
-            href="/sign-up?role=faculty"
-            className="group relative overflow-hidden rounded-2xl bg-white/8 py-4 flex flex-col items-center gap-2 transition-all hover:bg-white/14 active:scale-95"
-          >
-            <GraduationCap className="h-8 w-8 text-[#D4AF37]" strokeWidth={1.5} />
-            <span className="text-[11px] font-semibold text-white/80 text-center leading-tight group-hover:text-white transition-colors">
-              Register as<br />Faculty
-            </span>
-            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-[#D4AF37]/40 to-transparent" />
-          </Link>
-
-          {/* Program Chair */}
-          <Link
-            href="/sign-up?role=admin"
-            className="group relative overflow-hidden rounded-2xl bg-white/8 py-4 flex flex-col items-center gap-2 transition-all hover:bg-white/14 active:scale-95"
-          >
-            <Users className="h-8 w-8 text-[#D4AF37]" strokeWidth={1.5} />
-            <span className="text-[11px] font-semibold text-white/80 text-center leading-tight group-hover:text-white transition-colors">
-              Register as<br />Program Chair
-            </span>
-            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-[#D4AF37]/40 to-transparent" />
-          </Link>
-        </div>
+        {/* Sign Up */}
+        <Link
+          href="/sign-up"
+          className="mt-4 w-full rounded-2xl bg-white/8 py-3.5 text-center text-sm font-bold text-white/90 transition-all hover:bg-white/14 hover:text-white active:scale-95"
+        >
+          Sign Up
+        </Link>
       </div>
 
       {/* Footer */}

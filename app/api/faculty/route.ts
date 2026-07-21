@@ -88,6 +88,17 @@ export async function POST(req: Request) {
       return NextResponse.json(apiError("Department is required"), { status: 400 })
     }
 
+    // ADMIN (Program Chair) can only create faculty in their own department
+    if (dbUser.role === "ADMIN") {
+      const adminDeptId = getUserDepartmentId(dbUser)
+      if (!adminDeptId || departmentId !== adminDeptId) {
+        return NextResponse.json(
+          apiError("Forbidden — you can only add faculty to your own department"),
+          { status: 403 }
+        )
+      }
+    }
+
     // Auto-generate employeeId if not provided
     const employeeId = providedEmployeeId || `FAC-${Date.now()}`
 

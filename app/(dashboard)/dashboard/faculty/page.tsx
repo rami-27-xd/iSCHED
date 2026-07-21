@@ -312,8 +312,13 @@ function MobileFacultyList({
 export default function FacultyPage() {
   const [search, setSearch] = useState("")
   const [addOpen, setAddOpen] = useState(false)
+  // mode "existing" links an approved user; "new" creates a person from scratch
+  const [addMode, setAddMode] = useState<"existing" | "new">("existing")
   const [addForm, setAddForm] = useState({
     userId: "",
+    firstName: "",
+    lastName: "",
+    email: "",
     sectionCounts: {} as SectionCountMap,
     maxUnitsPerWeek: 21,
   })
@@ -499,17 +504,34 @@ export default function FacultyPage() {
 
   // ── Handlers ──
   async function handleAdd() {
-    const { userId, sectionCounts, maxUnitsPerWeek } = addForm
-    if (!userId) return toast.error("Please select a faculty member")
-    // Resolve department: from the matched available user, or from currentUser directly
-    const user = availableUsers.find((u: any) => u.id === userId)
-    const departmentId = user?.department?.id ?? user?.departmentId
-    if (!departmentId) return toast.error("No department found. Please ensure your account has a department assigned.")
+    const { userId, firstName, lastName, email, sectionCounts, maxUnitsPerWeek } = addForm
     const specs = getSpecsFromCounts(sectionCounts)
+
     try {
-      await createFaculty.mutateAsync({ userId, departmentId, specializations: specs, sectionCounts, maxUnitsPerWeek })
+      if (addMode === "new") {
+        // Create a brand-new faculty person — always in the current user's own department
+        if (!firstName.trim()) return toast.error("First name is required")
+        if (!lastName.trim()) return toast.error("Last name is required")
+        if (!userDeptId) return toast.error("No department found. Please ensure your account has a department assigned.")
+        await createFaculty.mutateAsync({
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          ...(email.trim() ? { email: email.trim().toLowerCase() } : {}),
+          departmentId: userDeptId,
+          specializations: specs,
+          sectionCounts,
+          maxUnitsPerWeek,
+        })
+      } else {
+        if (!userId) return toast.error("Please select a faculty member")
+        // Resolve department: from the matched available user, or from currentUser directly
+        const user = availableUsers.find((u: any) => u.id === userId)
+        const departmentId = user?.department?.id ?? user?.departmentId
+        if (!departmentId) return toast.error("No department found. Please ensure your account has a department assigned.")
+        await createFaculty.mutateAsync({ userId, departmentId, specializations: specs, sectionCounts, maxUnitsPerWeek })
+      }
       setAddOpen(false)
-      setAddForm({ userId: "", sectionCounts: {}, maxUnitsPerWeek: 21 })
+      setAddForm({ userId: "", firstName: "", lastName: "", email: "", sectionCounts: {}, maxUnitsPerWeek: 21 })
     } catch (err: any) {
       toast.error(err.message)
     }
@@ -563,12 +585,67 @@ export default function FacultyPage() {
             <DialogContent className="sm:max-w-lg">
               <DialogHeader><DialogTitle>Add Faculty</DialogTitle></DialogHeader>
               <div className="grid gap-4 py-4">
-                {/* Faculty selector */}
+                {/* Mode toggle: link an existing account vs. create a new person */}
+                <div className="flex rounded-lg border border-input p-1 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setAddMode("existing")}
+                    className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                      addMode === "existing" ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                    }`}
+                  >
+                    Existing User
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddMode("new")}
+                    className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                      addMode === "new" ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                    }`}
+                  >
+                    New Faculty
+                  </button>
+                </div>
+
+                {addMode === "new" ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="grid gap-2">
+                        <Label>First Name</Label>
+                        <Input
+                          value={addForm.firstName}
+                          onChange={(e) => setAddForm(f => ({ ...f, firstName: e.target.value }))}
+                          placeholder="Juan"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label>Last Name</Label>
+                        <Input
+                          value={addForm.lastName}
+                          onChange={(e) => setAddForm(f => ({ ...f, lastName: e.target.value }))}
+                          placeholder="Dela Cruz"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Email <span className="text-muted-foreground font-normal">(optional — enables magic-link login)</span></Label>
+                      <Input
+                        type="email"
+                        value={addForm.email}
+                        onChange={(e) => setAddForm(f => ({ ...f, email: e.target.value }))}
+                        placeholder="name@gmail.com"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        Added to your own department automatically.
+                      </p>
+                    </div>
+                  </>
+                ) : (
                 <div className="grid gap-2">
                   <Label>Faculty</Label>
                   {isAdmin && availableUsers.length === 0 ? (
                     <p className="text-sm text-muted-foreground rounded-lg border border-input px-3 py-2 bg-muted/30">
-                      You are already registered as a faculty member.
+                      You are already registered as a faculty member. Use <strong>New Faculty</strong> to add someone else.
                     </p>
                   ) : (
                     <select
@@ -598,6 +675,7 @@ export default function FacultyPage() {
                     <p className="text-xs text-destructive">No department found. Contact the Department Chair to assign one.</p>
                   )}
                 </div>
+                )}
 
                 {/* Max units */}
                 <div className="grid gap-2">

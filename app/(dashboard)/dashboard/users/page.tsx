@@ -17,7 +17,7 @@ import {
 import { Label } from "@/components/ui/label"
 import {
   Search, Shield, MoreHorizontal, CheckCircle2, XCircle,
-  UserCog, UserX, Loader2, ShieldCheck, ShieldAlert, Building2,
+  UserCog, UserX, Loader2, ShieldCheck, ShieldAlert, Building2, Pencil,
 } from "lucide-react"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -61,6 +61,7 @@ interface User {
   cluster?: { id: string; name: string } | null
   department?: Department | null
   programHead?: { programId: string; program: { id: string; name: string; abbreviation?: string } } | null
+  faculty?: { id: string } | null
 }
 
 export default function UsersPage() {
@@ -81,6 +82,10 @@ export default function UsersPage() {
   const [deptId, setDeptId] = useState("")
   const [programId, setProgramId] = useState("")
   const [clusterId, setClusterId] = useState("")
+
+  // Edit Faculty dialog (name/email of a faculty-linked user)
+  const [editFacultyUser, setEditFacultyUser] = useState<User | null>(null)
+  const [editFacultyForm, setEditFacultyForm] = useState({ firstName: "", lastName: "", email: "" })
   const { data: departments = [] } = useDepartments()
 
   // For the Change Department dialog: detect if selected dept is in CAS
@@ -101,6 +106,13 @@ export default function UsersPage() {
   const isSuperAdmin = currentUser?.role === "SUPER_ADMIN"
   const isAdmin = currentUser?.role === "ADMIN"
   const isMobile = useIsMobile()
+
+  // ADMIN (Program Chair) can manage FACULTY accounts in their own department
+  // (approve + activate/deactivate only). SUPER_ADMIN manages everyone.
+  const myDeptId = currentUser?.departmentId ?? null
+  const canManageUser = (u: any) =>
+    isSuperAdmin ||
+    (isAdmin && u.role === "FACULTY" && !!myDeptId && (u.department?.id ?? null) === myDeptId)
 
   // Fetch programs for the selected department (used when assigning Program Chair)
   const { data: deptPrograms = [] } = useQuery<any[]>({
@@ -207,6 +219,37 @@ export default function UsersPage() {
     },
     onError: (err: Error) => toast.error(err.message),
   })
+
+  // Edit faculty name/email — goes through the faculty API, which enforces
+  // department scoping for Program Chairs and handles magic-link account
+  // creation when a real email is added to a stub faculty.
+  const editFacultyMutation = useMutation({
+    mutationFn: async ({ facultyId, firstName, lastName, email }: { facultyId: string; firstName: string; lastName: string; email: string }) => {
+      return safeFetch(`/api/faculty/${facultyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ firstName, lastName, email }),
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] })
+      queryClient.invalidateQueries({ queryKey: ["faculty"] })
+      toast.success("Faculty details updated")
+      setEditFacultyUser(null)
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
+
+  function openEditFaculty(u: User) {
+    setEditFacultyUser(u)
+    const email = u.email ?? ""
+    setEditFacultyForm({
+      firstName: u.firstName ?? "",
+      lastName: u.lastName ?? "",
+      // Don't pre-fill stub/generated emails — leave blank so a real one can be entered
+      email: email.endsWith("@faculty.slsu.edu.ph") || email.endsWith("@stub.local") ? "" : email,
+    })
+  }
 
   // Count pending approvals
   const pendingCount = users.filter((u) => !u.isApproved).length
@@ -315,12 +358,17 @@ export default function UsersPage() {
                         </p>
                       )}
                     </div>
-                    {isSuperAdmin && (
+                    {canManageUser(u) && (
                       <DropdownMenu>
                         <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" />}>
                           <MoreHorizontal className="h-4 w-4" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          {u.faculty?.id && (
+                            <DropdownMenuItem onClick={() => openEditFaculty(u)}>
+                              <Pencil className="mr-2 h-4 w-4" />Edit Faculty
+                            </DropdownMenuItem>
+                          )}
                           {!u.isApproved ? (
                             <DropdownMenuItem onClick={() => approveMutation.mutate({ id: u.id, isApproved: true })}>
                               <CheckCircle2 className="mr-2 h-4 w-4 text-green-600" />Approve User
@@ -330,12 +378,16 @@ export default function UsersPage() {
                               <XCircle className="mr-2 h-4 w-4 text-amber-600" />Revoke Approval
                             </DropdownMenuItem>
                           )}
-                          <DropdownMenuItem onClick={() => { setEditUser(u); setEditRole(u.role) }}>
-                            <UserCog className="mr-2 h-4 w-4" />Change Role
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => { setDeptUser(u); setDeptId(u.department?.id ?? ""); setProgramId(u.programHead?.programId ?? ""); setClusterId(u.clusterId ?? "") }}>
-                            <Building2 className="mr-2 h-4 w-4" />Change Department
-                          </DropdownMenuItem>
+                          {isSuperAdmin && (
+                            <>
+                              <DropdownMenuItem onClick={() => { setEditUser(u); setEditRole(u.role) }}>
+                                <UserCog className="mr-2 h-4 w-4" />Change Role
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => { setDeptUser(u); setDeptId(u.department?.id ?? ""); setProgramId(u.programHead?.programId ?? ""); setClusterId(u.clusterId ?? "") }}>
+                                <Building2 className="mr-2 h-4 w-4" />Change Department
+                              </DropdownMenuItem>
+                            </>
+                          )}
                           <DropdownMenuSeparator />
                           {u.isActive ? (
                             <DropdownMenuItem className="text-destructive" onClick={() => activeMutation.mutate({ id: u.id, isActive: false })}>
@@ -363,7 +415,7 @@ export default function UsersPage() {
                   <TableHead>Approval</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Registered</TableHead>
-                  {isSuperAdmin && <TableHead className="w-10"></TableHead>}
+                  {(isSuperAdmin || isAdmin) && <TableHead className="w-10"></TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -426,13 +478,22 @@ export default function UsersPage() {
                     <TableCell className="text-sm text-muted-foreground">
                       {new Date(u.createdAt).toLocaleDateString()}
                     </TableCell>
-                    {isSuperAdmin && (
+                    {(isSuperAdmin || isAdmin) && (
                     <TableCell>
+                      {canManageUser(u) && (
                       <DropdownMenu>
                         <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-8 w-8" />}>
                           <MoreHorizontal className="h-4 w-4" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          {/* Edit faculty details (name/email) */}
+                          {u.faculty?.id && (
+                            <DropdownMenuItem onClick={() => openEditFaculty(u)}>
+                              <Pencil className="mr-2 h-4 w-4" />
+                              Edit Faculty
+                            </DropdownMenuItem>
+                          )}
+
                           {/* Approve / Revoke */}
                           {!u.isApproved ? (
                             <DropdownMenuItem
@@ -450,29 +511,32 @@ export default function UsersPage() {
                             </DropdownMenuItem>
                           )}
 
-                          {/* Change Role */}
-                          <DropdownMenuItem
-                            onClick={() => {
-                              setEditUser(u)
-                              setEditRole(u.role)
-                            }}
-                          >
-                            <UserCog className="mr-2 h-4 w-4" />
-                            Change Role
-                          </DropdownMenuItem>
+                          {/* Change Role / Change Department — SUPER_ADMIN only */}
+                          {isSuperAdmin && (
+                            <>
+                              <DropdownMenuItem
+                                onClick={() => {
+                                  setEditUser(u)
+                                  setEditRole(u.role)
+                                }}
+                              >
+                                <UserCog className="mr-2 h-4 w-4" />
+                                Change Role
+                              </DropdownMenuItem>
 
-                          {/* Change Department */}
-                          <DropdownMenuItem
-                            onClick={() => {
-                              setDeptUser(u)
-                              setDeptId(u.department?.id ?? "")
-                              setProgramId(u.programHead?.programId ?? "")
-                              setClusterId(u.clusterId ?? "")
-                            }}
-                          >
-                            <Building2 className="mr-2 h-4 w-4" />
-                            Change Department
-                          </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => {
+                                  setDeptUser(u)
+                                  setDeptId(u.department?.id ?? "")
+                                  setProgramId(u.programHead?.programId ?? "")
+                                  setClusterId(u.clusterId ?? "")
+                                }}
+                              >
+                                <Building2 className="mr-2 h-4 w-4" />
+                                Change Department
+                              </DropdownMenuItem>
+                            </>
+                          )}
 
                           <DropdownMenuSeparator />
 
@@ -495,6 +559,7 @@ export default function UsersPage() {
                           )}
                         </DropdownMenuContent>
                       </DropdownMenu>
+                      )}
                     </TableCell>
                     )}
                   </TableRow>
@@ -504,6 +569,62 @@ export default function UsersPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit Faculty Dialog — name/email for faculty-linked users */}
+      <Dialog open={!!editFacultyUser} onOpenChange={(open) => !open && setEditFacultyUser(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Edit Faculty</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-2">
+                <Label>First Name</Label>
+                <Input
+                  value={editFacultyForm.firstName}
+                  onChange={(e) => setEditFacultyForm(f => ({ ...f, firstName: e.target.value }))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label>Last Name</Label>
+                <Input
+                  value={editFacultyForm.lastName}
+                  onChange={(e) => setEditFacultyForm(f => ({ ...f, lastName: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>Email <span className="text-muted-foreground font-normal">(optional — enables magic-link login)</span></Label>
+              <Input
+                type="email"
+                value={editFacultyForm.email}
+                onChange={(e) => setEditFacultyForm(f => ({ ...f, email: e.target.value }))}
+                placeholder="name@gmail.com"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditFacultyUser(null)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                if (!editFacultyUser?.faculty?.id) return
+                if (!editFacultyForm.firstName.trim()) return toast.error("First name is required")
+                if (!editFacultyForm.lastName.trim()) return toast.error("Last name is required")
+                editFacultyMutation.mutate({
+                  facultyId: editFacultyUser.faculty.id,
+                  firstName: editFacultyForm.firstName.trim(),
+                  lastName: editFacultyForm.lastName.trim(),
+                  email: editFacultyForm.email.trim().toLowerCase(),
+                })
+              }}
+              disabled={editFacultyMutation.isPending}
+            >
+              {editFacultyMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Change Role Dialog */}
       <Dialog open={!!editUser} onOpenChange={(open) => !open && setEditUser(null)}>

@@ -45,7 +45,7 @@ export async function validateEntry(
   })
 
   // Step 2: Parallel fetch using semesterId
-  const [sameScheduleEntries, crossScheduleEntries, faculty, subject, section] = await Promise.all([
+  const [sameScheduleEntries, crossScheduleEntries, faculty, subject, section, roomAccess] = await Promise.all([
     // Entries within THIS schedule — used for section-overlap checks
     db.scheduleEntry.findMany({
       where: {
@@ -104,15 +104,34 @@ export async function validateEntry(
       where: { id: entry.subjectId },
       select: { title: true, code: true, year: true, yearLevelId: true, departmentId: true },
     }),
-    // Section info (include yearLevel for alignment check)
+    // Section info (include yearLevel + college for alignment and Saturday checks)
     db.section.findUnique({
       where: { id: entry.sectionId },
       select: {
         name: true,
         yearLevelId: true,
         yearLevel: {
-          select: { level: true, program: { select: { name: true, departmentId: true } } },
+          select: {
+            level: true,
+            program: {
+              select: {
+                id: true,
+                name: true,
+                departmentId: true,
+                department: { select: { college: { select: { abbreviation: true } } } },
+              },
+            },
+          },
         },
+      },
+    }),
+    // Room access restrictions (department- and program-level, union semantics)
+    db.room.findUnique({
+      where: { id: entry.roomId },
+      select: {
+        code: true,
+        departments: { select: { departmentId: true } },
+        programs: { select: { programId: true } },
       },
     }),
   ])
@@ -126,6 +145,30 @@ export async function validateEntry(
   if (faculty && (faculty.isActive === false || faculty.user?.isActive === false)) {
     const fname = faculty.user ? `${faculty.user.firstName} ${faculty.user.lastName}` : "This faculty member"
     return `${fname} is inactive and cannot be assigned to a schedule entry`
+  }
+
+  // 0b. Saturday restriction — only CAM (College of Allied Medicine) sections and
+  // NSTP subjects may be scheduled on Saturdays (hard constraint, same as engine).
+  if (entry.day === "SATURDAY") {
+    const subjCode = (subject?.code ?? "").toUpperCase()
+    const isNstp = subjCode.startsWith("NSTP") || subjCode.startsWith("NST")
+    const collegeAbbr = section?.yearLevel?.program?.department?.college?.abbreviation
+    if (!isNstp && collegeAbbr !== "CAM") {
+      return `Saturday classes are reserved for CAM (College of Allied Medicine) sections and NSTP subjects. ${section?.name ?? "This section"} cannot be scheduled on Saturday.`
+    }
+  }
+
+  // 0c. Room access restriction — a room restricted to departments/programs may
+  // only host sections whose department OR program (course) is on its list.
+  if (roomAccess && (roomAccess.departments.length > 0 || roomAccess.programs.length > 0)) {
+    const sectionDeptId = section?.yearLevel?.program?.departmentId
+    const sectionProgramId = section?.yearLevel?.program?.id
+    const allowed =
+      (!!sectionDeptId && roomAccess.departments.some((d) => d.departmentId === sectionDeptId)) ||
+      (!!sectionProgramId && roomAccess.programs.some((p) => p.programId === sectionProgramId))
+    if (!allowed) {
+      return `Room access restriction: ${roomAccess.code} is reserved for specific departments/programs — ${section?.yearLevel?.program?.name ?? "this section's program"} is not allowed to use it.`
+    }
   }
 
   // 1. Faculty overlap — same faculty, same day, overlapping times (checked globally across all schedules)

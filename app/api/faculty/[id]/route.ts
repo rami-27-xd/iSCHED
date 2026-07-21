@@ -1,8 +1,46 @@
 import { NextResponse } from "next/server"
-import { getAuthenticatedUser } from "@/lib/auth"
+import { getAuthenticatedUser, getCurrentUser, getUserDepartmentId } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 import { createAdminClient } from "@/lib/supabase/admin"
+
+/**
+ * Write-permission guard for faculty records:
+ *   SUPER_ADMIN — any faculty.
+ *   ADMIN (Program Chair) — only faculty in their own department.
+ *   Everyone else — forbidden.
+ * Returns an error response to send, or null when the caller is allowed.
+ */
+async function checkFacultyWriteAccess(facultyId: string): Promise<
+  { error: NextResponse; dbUser?: never } | { error: null; dbUser: any }
+> {
+  const dbUser = await getCurrentUser()
+  if (!dbUser || !["SUPER_ADMIN", "ADMIN"].includes(dbUser.role)) {
+    return { error: NextResponse.json(apiError("Forbidden — insufficient permissions"), { status: 403 }) }
+  }
+
+  const target = await db.faculty.findUnique({
+    where: { id: facultyId },
+    select: { departmentId: true },
+  })
+  if (!target) {
+    return { error: NextResponse.json(apiError("Faculty not found"), { status: 404 }) }
+  }
+
+  if (dbUser.role === "ADMIN") {
+    const adminDeptId = getUserDepartmentId(dbUser)
+    if (!adminDeptId || target.departmentId !== adminDeptId) {
+      return {
+        error: NextResponse.json(
+          apiError("Forbidden — you can only manage faculty in your own department"),
+          { status: 403 }
+        ),
+      }
+    }
+  }
+
+  return { error: null, dbUser }
+}
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -34,8 +72,22 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (!user) return NextResponse.json(apiError("Unauthorized"), { status: 401 })
 
     const { id } = await params
+    const access = await checkFacultyWriteAccess(id)
+    if (access.error) return access.error
+
     const body = await req.json()
     const { employeeId, departmentId, specializations, sectionCounts, maxUnitsPerWeek, isActive, firstName, lastName, email } = body
+
+    // ADMIN cannot move faculty into another department
+    if (access.dbUser.role === "ADMIN" && departmentId !== undefined) {
+      const adminDeptId = getUserDepartmentId(access.dbUser)
+      if (departmentId !== adminDeptId) {
+        return NextResponse.json(
+          apiError("Forbidden — cannot move faculty to another department"),
+          { status: 403 }
+        )
+      }
+    }
 
     const faculty = await db.faculty.update({
       where: { id },
@@ -117,6 +169,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     if (!user) return NextResponse.json(apiError("Unauthorized"), { status: 401 })
 
     const { id } = await params
+    const access = await checkFacultyWriteAccess(id)
+    if (access.error) return access.error
+
     await db.faculty.delete({ where: { id } })
     return NextResponse.json(apiResponse({ deleted: true }))
   } catch (error: any) {

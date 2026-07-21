@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
         clusterId: true,
         cluster: { select: { id: true, name: true } },
         department: { select: { id: true, name: true, abbreviation: true } },
-        faculty: { select: { department: { select: { id: true, name: true, abbreviation: true } } } },
+        faculty: { select: { id: true, department: { select: { id: true, name: true, abbreviation: true } } } },
         departmentChair: { select: { department: { select: { id: true, name: true, abbreviation: true } } } },
         programHead: { select: { programId: true, program: { select: { id: true, name: true, abbreviation: true, department: { select: { id: true, name: true, abbreviation: true } } } } } },
       },
@@ -87,6 +87,7 @@ export async function GET(request: NextRequest) {
         cluster: u.cluster ?? null,
         department: dept,
         programHead: u.programHead ?? null,
+        faculty: u.faculty ? { id: u.faculty.id } : null,
       }
     })
 

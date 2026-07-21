@@ -18,17 +18,14 @@ export async function GET() {
       return NextResponse.json(apiResponse([]))
     }
 
-    // Determine which schedule statuses this user can see:
-    // - SUPER_ADMIN / ADMIN: can see DRAFT + PUBLISHED (they manage schedules)
-    // - FACULTY: can only see PUBLISHED
-    const isAdmin = user.role === "SUPER_ADMIN" || user.role === "ADMIN"
-
-    // Get entries from non-archived schedules for this faculty
+    // My Schedule shows PUBLISHED entries only — for every role. Draft and
+    // pending schedules are working documents; they appear in Manage Schedules,
+    // never in a personal timetable (panelist compliance requirement).
     const entries = await db.scheduleEntry.findMany({
       where: {
         facultyId: user.faculty.id,
         schedule: {
-          status: isAdmin ? { in: ["DRAFT", "PUBLISHED"] } : "PUBLISHED",
+          status: "PUBLISHED",
           isArchived: false,
         },
       },

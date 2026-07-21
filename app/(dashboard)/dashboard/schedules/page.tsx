@@ -82,6 +82,16 @@ import { useCollege } from "@/lib/college-context"
 
 const DAYS = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]
 
+// Saturday classes are reserved for CAM (College of Allied Medicine) sections
+// and NSTP subjects — mirrors the engine/API hard constraint.
+function subjectAllowsSaturday(subject: any): boolean {
+  const code = (subject?.code ?? "").toUpperCase()
+  return code.startsWith("NSTP") || code.startsWith("NST")
+}
+function sectionAllowsSaturday(section: any): boolean {
+  return section?.yearLevel?.program?.department?.college?.abbreviation === "CAM"
+}
+
 const TIME_OPTIONS = Array.from({ length: 28 }, (_, i) => {
   const totalMins = 7 * 60 + 30 + i * 30
   const h = String(Math.floor(totalMins / 60)).padStart(2, "0")
@@ -108,6 +118,7 @@ function ScheduleStatusBadge({ status }: { status?: string }) {
 export default function SchedulesPage() {
   const [tab, setTab] = useState("active")
   const [deptFilter, setDeptFilter] = useState("")   // department filter inside the schedule list
+  const [semFilter, setSemFilter] = useState("")     // semester type filter (FIRST | SECOND | SUMMER)
   const [view, setView] = useState("list")
   const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null)
 
@@ -338,11 +349,30 @@ export default function SchedulesPage() {
     return matched.length > 0 ? matched : pool
   }, [facultyList, entryForm.subjectId, selectedSubjectForEntry])
 
+  // Room access check shared by Add/Edit Entry: a room restricted to
+  // departments/programs may only host sections whose department OR program
+  // (course) is on its list. Unrestricted rooms are open to everyone.
+  function roomOpenToSection(room: any, section: any): boolean {
+    const depts = room?.departments ?? []
+    const progs = room?.programs ?? []
+    if (depts.length === 0 && progs.length === 0) return true
+    const secProgramId = section?.yearLevel?.programId ?? section?.yearLevel?.program?.id
+    const secDeptId = section?.yearLevel?.program?.departmentId
+    return (
+      depts.some((d: any) => d.departmentId === secDeptId) ||
+      progs.some((p: any) => (p.programId ?? p.program?.id) === secProgramId)
+    )
+  }
+
   // Filter rooms by subject type AND department-building restriction.
   // Uses departmentRooms (already filtered to the dept's buildings) as the source pool.
   const filteredRooms = useMemo(() => {
     // Use department-restricted rooms when available, fall back to all rooms
-    const pool = departmentRooms.length > 0 ? departmentRooms : rooms
+    let pool = departmentRooms.length > 0 ? departmentRooms : rooms
+    // Program (course) room access — narrow to rooms the selected section may use
+    if (entryForm.sectionId && selectedSectionForEntry) {
+      pool = pool.filter((r: any) => roomOpenToSection(r, selectedSectionForEntry))
+    }
     if (!entryForm.subjectId || !selectedSubjectForEntry) return pool
     const subjectType = selectedSubjectForEntry.type
     if (subjectType === 'LABORATORY') {
@@ -354,7 +384,7 @@ export default function SchedulesPage() {
       return lectureRooms.length > 0 ? lectureRooms : pool
     }
     return pool
-  }, [rooms, departmentRooms, entryForm.subjectId, selectedSubjectForEntry])
+  }, [rooms, departmentRooms, entryForm.subjectId, entryForm.sectionId, selectedSubjectForEntry, selectedSectionForEntry])
 
   // Issue 9: Filter time options based on faculty availability for selected day
   const availableTimeOptions = useMemo(() => {
@@ -426,13 +456,17 @@ export default function SchedulesPage() {
     return result
   }, [sections, entryForm.subjectId, selectedSubjectForEntry, sectionSearch, adminDeptId, scheduleSemesterType])
 
-  // Filter days by faculty availability — only show days where faculty has availability set
+  // Filter days by faculty availability — only show days where faculty has availability set.
+  // Saturday is excluded unless the subject is NSTP or the section belongs to CAM.
   const availableDays = useMemo(() => {
-    if (!entryForm.facultyId || facultyAvailability.length === 0) return DAYS
+    const saturdayOk =
+      subjectAllowsSaturday(selectedSubjectForEntry) || sectionAllowsSaturday(selectedSectionForEntry)
+    const basePool = saturdayOk ? DAYS : DAYS.filter((d) => d !== "SATURDAY")
+    if (!entryForm.facultyId || facultyAvailability.length === 0) return basePool
     const daysWithAvail = [...new Set(facultyAvailability.map((a: any) => a.day))]
-    const filtered = DAYS.filter((d) => daysWithAvail.includes(d))
-    return filtered.length > 0 ? filtered : DAYS
-  }, [entryForm.facultyId, facultyAvailability])
+    const filtered = basePool.filter((d) => daysWithAvail.includes(d))
+    return filtered.length > 0 ? filtered : basePool
+  }, [entryForm.facultyId, facultyAvailability, selectedSubjectForEntry, selectedSectionForEntry])
 
   // Conflict override dialog state (soft-validation)
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
@@ -480,9 +514,10 @@ export default function SchedulesPage() {
     enabled: !!editEntryForm.facultyId && !!selectedSchedule?.semesterId,
   })
 
-  // Edit: selected faculty & subject lookups
+  // Edit: selected faculty, subject & section lookups
   const editSelectedFaculty = useMemo(() => facultyList.find((f: any) => f.id === editEntryForm.facultyId), [facultyList, editEntryForm.facultyId])
   const editSelectedSubject = useMemo(() => subjects.find((s: any) => s.id === editEntryForm.subjectId), [subjects, editEntryForm.subjectId])
+  const editSelectedSection = useMemo(() => sections.find((s: any) => s.id === editEntryForm.sectionId), [sections, editEntryForm.sectionId])
 
   // Edit: filter subjects by selected faculty's specializations
   const editFilteredSubjects = useMemo(() => {
@@ -546,27 +581,32 @@ export default function SchedulesPage() {
 
   // Edit: filter rooms by subject's required room type, falling back to subject type
   const editFilteredRooms = useMemo(() => {
-    if (!editEntryForm.subjectId || !editSelectedSubject) return rooms
+    // Program (course) room access — narrow to rooms the selected section may use
+    let pool = rooms as any[]
+    if (editEntryForm.sectionId && editSelectedSection) {
+      pool = pool.filter((r: any) => roomOpenToSection(r, editSelectedSection))
+    }
+    if (!editEntryForm.subjectId || !editSelectedSubject) return pool
     // Prefer explicit requiredRoomType list set on the subject
     const requiredTypes: string[] = editSelectedSubject.requiredRoomType ?? []
     if (requiredTypes.length > 0) {
-      const filtered = rooms.filter((r: any) => requiredTypes.includes(r.type))
-      return filtered.length > 0 ? filtered : rooms
+      const filtered = pool.filter((r: any) => requiredTypes.includes(r.type))
+      return filtered.length > 0 ? filtered : pool
     }
     // Fall back: lab subjects can use any lab-category room
     const subjectType = editSelectedSubject.type
     if (subjectType === 'LABORATORY') {
-      const labs = rooms.filter((r: any) =>
+      const labs = pool.filter((r: any) =>
         r.type === 'LABORATORY' || r.type === 'COMPUTER_LAB' || r.type === 'LECTURE_LAB'
       )
-      return labs.length > 0 ? labs : rooms
+      return labs.length > 0 ? labs : pool
     }
     if (subjectType === 'LECTURE') {
-      const lectureRooms = rooms.filter((r: any) => r.type === 'LECTURE_ROOM')
-      return lectureRooms.length > 0 ? lectureRooms : rooms
+      const lectureRooms = pool.filter((r: any) => r.type === 'LECTURE_ROOM')
+      return lectureRooms.length > 0 ? lectureRooms : pool
     }
-    return rooms
-  }, [rooms, editEntryForm.subjectId, editSelectedSubject])
+    return pool
+  }, [rooms, editEntryForm.subjectId, editEntryForm.sectionId, editSelectedSubject, editSelectedSection])
 
   // Edit: filter sections by subject alignment (year level + department)
   const editFilteredSections = useMemo(() => {
@@ -607,13 +647,16 @@ export default function SchedulesPage() {
     return result
   }, [sections, editEntryForm.subjectId, editSelectedSubject, editSectionSearch, adminDeptId])
 
-  // Edit: filter days by faculty availability
+  // Edit: filter days by faculty availability + Saturday restriction (CAM/NSTP only)
   const editAvailableDays = useMemo(() => {
-    if (!editEntryForm.facultyId || editFacultyAvailability.length === 0) return DAYS
+    const saturdayOk =
+      subjectAllowsSaturday(editSelectedSubject) || sectionAllowsSaturday(editSelectedSection)
+    const basePool = saturdayOk ? DAYS : DAYS.filter((d) => d !== "SATURDAY")
+    if (!editEntryForm.facultyId || editFacultyAvailability.length === 0) return basePool
     const daysWithAvail = [...new Set(editFacultyAvailability.map((a: any) => a.day))]
-    const filtered = DAYS.filter((d) => daysWithAvail.includes(d))
-    return filtered.length > 0 ? filtered : DAYS
-  }, [editEntryForm.facultyId, editFacultyAvailability])
+    const filtered = basePool.filter((d) => daysWithAvail.includes(d))
+    return filtered.length > 0 ? filtered : basePool
+  }, [editEntryForm.facultyId, editFacultyAvailability, editSelectedSubject, editSelectedSection])
 
   // Edit: filter time options by faculty availability for selected day
   const editAvailableTimeOptions = useMemo(() => {
@@ -682,9 +725,12 @@ export default function SchedulesPage() {
     if (isAdmin && adminDeptId) {
       base = base.filter((s: any) => (s.departmentId ?? s.department?.id) === adminDeptId)
     }
+    if (semFilter) {
+      base = base.filter((s: any) => s.semester?.type === semFilter)
+    }
     if (!deptFilter) return base
     return base.filter((s: any) => s.department?.id === deptFilter)
-  }, [tab, activeSchedules, archivedSchedules, deptFilter, isAdmin, adminDeptId])
+  }, [tab, activeSchedules, archivedSchedules, deptFilter, semFilter, isAdmin, adminDeptId])
 
   const entries: any[] = selectedSchedule?.entries ?? []
 
@@ -1467,6 +1513,29 @@ export default function SchedulesPage() {
             </TabsList>
           </Tabs>
 
+          {/* Semester filter — pick 1st or 2nd semester schedules */}
+          <div className="flex items-center gap-1.5">
+            <CalendarDays className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <select
+              value={semFilter}
+              onChange={(e) => { setSemFilter(e.target.value); setSelectedScheduleId(null) }}
+              className="flex-1 h-8 rounded-lg border border-input bg-background px-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring truncate"
+            >
+              <option value="">All Semesters</option>
+              <option value="FIRST">1st Semester</option>
+              <option value="SECOND">2nd Semester</option>
+              <option value="SUMMER">Summer</option>
+            </select>
+            {semFilter && (
+              <button
+                onClick={() => { setSemFilter(""); setSelectedScheduleId(null) }}
+                className="text-[10px] text-red-500 hover:text-red-600 underline shrink-0"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
           {/* Department filter — visible only when SUPER_ADMIN sees multiple departments */}
           {deptOptions.length > 1 && (
             <div className="flex items-center gap-1.5">
@@ -1526,6 +1595,17 @@ export default function SchedulesPage() {
                     </p>
                     <ScheduleStatusBadge status={s.status} />
                   </div>
+                  {/* Owning college/department — identifies the schedule without needing a filter */}
+                  {s.department && (
+                    <div className="mt-1 flex items-center gap-1.5 min-w-0">
+                      <span className="inline-flex items-center rounded bg-[#1B4332]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#1B4332] shrink-0">
+                        {s.department.college?.abbreviation ?? s.department.abbreviation}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground truncate">
+                        {s.department.name}
+                      </span>
+                    </div>
+                  )}
                   <p className="mt-1 text-xs text-muted-foreground">
                     {s._count?.entries ?? 0} entries
                     {s.semester?.startDate && s.semester?.endDate && (

@@ -50,6 +50,7 @@ export async function GET(req: Request) {
       include: {
         building: true,
         departments: { include: { department: true } },
+        programs: { include: { program: { select: { id: true, name: true, abbreviation: true } } } },
         _count: { select: { scheduleEntries: true } },
       },
       orderBy: [{ building: { name: "asc" } }, { name: "asc" }],
@@ -73,13 +74,14 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json()
-    const { name, code, buildingId, type, equipment, restrictedDepartmentIds } = body
+    const { name, code, buildingId, type, equipment, restrictedDepartmentIds, restrictedProgramIds } = body
 
     if (!name || !code || !buildingId || !type) {
       return NextResponse.json(apiError("name, code, buildingId, and type are required"), { status: 400 })
     }
 
     const deptIds: string[] = Array.isArray(restrictedDepartmentIds) ? restrictedDepartmentIds : []
+    const programIds: string[] = Array.isArray(restrictedProgramIds) ? restrictedProgramIds : []
 
     const room = await db.room.create({
       data: {
@@ -91,8 +93,15 @@ export async function POST(req: Request) {
         ...(deptIds.length > 0
           ? { departments: { create: deptIds.map((departmentId) => ({ departmentId })) } }
           : {}),
+        ...(programIds.length > 0
+          ? { programs: { create: programIds.map((programId) => ({ programId })) } }
+          : {}),
       },
-      include: { building: true, departments: { include: { department: true } } },
+      include: {
+        building: true,
+        departments: { include: { department: true } },
+        programs: { include: { program: { select: { id: true, name: true, abbreviation: true } } } },
+      },
     })
 
     return NextResponse.json(apiResponse(room), { status: 201 })

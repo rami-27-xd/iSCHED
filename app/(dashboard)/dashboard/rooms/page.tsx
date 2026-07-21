@@ -66,6 +66,10 @@ export default function RoomsPage() {
   const [addRoomCollegeIds, setAddRoomCollegeIds] = useState<string[]>([])
   const [editRoomCollegeIds, setEditRoomCollegeIds] = useState<string[]>([])
 
+  // Room-level program (course) access — finer-grained than college/department
+  const [addRoomProgramIds, setAddRoomProgramIds] = useState<string[]>([])
+  const [editRoomProgramIds, setEditRoomProgramIds] = useState<string[]>([])
+
   const { data: buildings = [], isLoading: loadingBuildings } = useBuildings()
   const { data: rooms = [], isLoading: loadingRooms } = useRoomList()
   const { data: allDepartments = [] } = useDepartments()
@@ -81,6 +85,24 @@ export default function RoomsPage() {
     }
     return Array.from(map.values()).sort((a, b) => a.abbreviation.localeCompare(b.abbreviation))
   }, [allDepartments])
+
+  // Flat list of programs (courses) across all departments, for room-level access.
+  const programOptions = useMemo(() => {
+    const list: any[] = []
+    for (const dept of (allDepartments as any[])) {
+      for (const prog of dept.programs ?? []) {
+        list.push({ ...prog, collegeAbbr: dept.college?.abbreviation ?? "" })
+      }
+    }
+    return list.sort((a, b) => a.abbreviation.localeCompare(b.abbreviation))
+  }, [allDepartments])
+
+  // For badge display: convert stored ProgramRoom rows to program abbreviations.
+  function programAbbrs(programs: any[]): string {
+    return programs
+      .map((p: any) => p.program?.abbreviation ?? programOptions.find(o => o.id === p.programId)?.abbreviation ?? "")
+      .filter(Boolean).join(", ")
+  }
 
   // Expand selected college IDs to all their department IDs (for the API).
   function collegeIdsToDeptIds(collegeIds: string[]): string[] {
@@ -143,6 +165,7 @@ export default function RoomsPage() {
     setRoomForm({ ...INITIAL_ROOM_FORM, buildingId })
     setAddRoomBuildingId(buildingId)
     setAddRoomCollegeIds([])
+    setAddRoomProgramIds([])
     setAddRoomOpen(true)
   }
 
@@ -150,6 +173,7 @@ export default function RoomsPage() {
     setEditTarget(r)
     setRoomForm({ name: r.name, code: r.code, buildingId: r.buildingId, type: r.type })
     setEditRoomCollegeIds(deptIdsToCollegeIds((r.departments ?? []).map((d: any) => d.departmentId)))
+    setEditRoomProgramIds((r.programs ?? []).map((p: any) => p.programId ?? p.program?.id).filter(Boolean))
     setEditOpen(true)
   }
 
@@ -157,10 +181,15 @@ export default function RoomsPage() {
     const { name, code, buildingId, type } = roomForm
     if (!name || !code || !buildingId || !type) return toast.error("Please fill in all required fields")
     try {
-      await createRoom.mutateAsync({ name, code, buildingId, type, restrictedDepartmentIds: collegeIdsToDeptIds(addRoomCollegeIds) })
+      await createRoom.mutateAsync({
+        name, code, buildingId, type,
+        restrictedDepartmentIds: collegeIdsToDeptIds(addRoomCollegeIds),
+        restrictedProgramIds: addRoomProgramIds,
+      })
       setAddRoomOpen(false)
       setRoomForm(INITIAL_ROOM_FORM)
       setAddRoomCollegeIds([])
+      setAddRoomProgramIds([])
     } catch (err: any) {
       toast.error(err.message)
     }
@@ -169,7 +198,11 @@ export default function RoomsPage() {
   async function handleUpdateRoom() {
     if (!editTarget) return
     try {
-      await updateRoom.mutateAsync({ id: editTarget.id, ...roomForm, restrictedDepartmentIds: collegeIdsToDeptIds(editRoomCollegeIds) })
+      await updateRoom.mutateAsync({
+        id: editTarget.id, ...roomForm,
+        restrictedDepartmentIds: collegeIdsToDeptIds(editRoomCollegeIds),
+        restrictedProgramIds: editRoomProgramIds,
+      })
       setEditOpen(false)
     } catch (err: any) {
       toast.error(err.message)
@@ -392,6 +425,12 @@ export default function RoomsPage() {
                                   {deptIdsToCollegeAbbrs(room.departments)}
                                 </Badge>
                               )}
+                              {room.programs?.length > 0 && (
+                                <Badge variant="outline" className="gap-1 text-xs border-blue-400 text-blue-700 bg-blue-50">
+                                  <Lock className="h-3 w-3" />
+                                  {programAbbrs(room.programs)}
+                                </Badge>
+                              )}
                               <Badge variant={room.isActive ? "default" : "secondary"}>
                                 {room.isActive ? "Active" : "Inactive"}
                               </Badge>
@@ -519,11 +558,11 @@ export default function RoomsPage() {
             </div>
             <div className="grid gap-2">
               <Label>
-                Course Access{" "}
+                College Access{" "}
                 <span className="text-xs font-normal text-muted-foreground">(optional)</span>
               </Label>
               <p className="text-[11px] text-muted-foreground -mt-1 leading-snug">
-                Leave empty to allow all departments. Select one or more to restrict this room.
+                Leave empty to allow all colleges. Select one or more to restrict this room.
               </p>
               <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
                 {collegeOptions.map((college: any) => (
@@ -544,9 +583,40 @@ export default function RoomsPage() {
                 ))}
               </div>
             </div>
+            <div className="grid gap-2">
+              <Label>
+                Program (Course) Access{" "}
+                <span className="text-xs font-normal text-muted-foreground">(optional)</span>
+              </Label>
+              <p className="text-[11px] text-muted-foreground -mt-1 leading-snug">
+                Restrict this room to specific programs. Works together with college access — a
+                section may use the room if its college OR its program is selected.
+              </p>
+              <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
+                {programOptions.map((prog: any) => (
+                  <label key={prog.id} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[#1B4332]"
+                      checked={addRoomProgramIds.includes(prog.id)}
+                      onChange={(e) =>
+                        setAddRoomProgramIds((prev) =>
+                          e.target.checked ? [...prev, prog.id] : prev.filter((id) => id !== prog.id)
+                        )
+                      }
+                    />
+                    <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">{prog.abbreviation}</span>
+                    <span className="truncate">{prog.name}</span>
+                    {prog.collegeAbbr && (
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{prog.collegeAbbr}</span>
+                    )}
+                  </label>
+                ))}
+              </div>
+            </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setAddRoomOpen(false); setRoomForm(INITIAL_ROOM_FORM); setAddRoomCollegeIds([]) }}>Cancel</Button>
+            <Button variant="outline" onClick={() => { setAddRoomOpen(false); setRoomForm(INITIAL_ROOM_FORM); setAddRoomCollegeIds([]); setAddRoomProgramIds([]) }}>Cancel</Button>
             <Button onClick={handleCreateRoom} disabled={createRoom.isPending}>
               {createRoom.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save Room
@@ -651,11 +721,11 @@ export default function RoomsPage() {
             </div>
             <div className="grid gap-2">
               <Label>
-                Course Access{" "}
+                College Access{" "}
                 <span className="text-xs font-normal text-muted-foreground">(optional)</span>
               </Label>
               <p className="text-[11px] text-muted-foreground -mt-1 leading-snug">
-                Leave empty to allow all departments. Select one or more to restrict this room.
+                Leave empty to allow all colleges. Select one or more to restrict this room.
               </p>
               <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
                 {collegeOptions.map((college: any) => (
@@ -672,6 +742,37 @@ export default function RoomsPage() {
                     />
                     <span className="w-14 shrink-0 font-mono text-xs text-muted-foreground">{college.abbreviation}</span>
                     <span className="truncate">{college.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>
+                Program (Course) Access{" "}
+                <span className="text-xs font-normal text-muted-foreground">(optional)</span>
+              </Label>
+              <p className="text-[11px] text-muted-foreground -mt-1 leading-snug">
+                Restrict this room to specific programs. Works together with college access — a
+                section may use the room if its college OR its program is selected.
+              </p>
+              <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
+                {programOptions.map((prog: any) => (
+                  <label key={prog.id} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[#1B4332]"
+                      checked={editRoomProgramIds.includes(prog.id)}
+                      onChange={(e) =>
+                        setEditRoomProgramIds((prev) =>
+                          e.target.checked ? [...prev, prog.id] : prev.filter((id) => id !== prog.id)
+                        )
+                      }
+                    />
+                    <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">{prog.abbreviation}</span>
+                    <span className="truncate">{prog.name}</span>
+                    {prog.collegeAbbr && (
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{prog.collegeAbbr}</span>
+                    )}
                   </label>
                 ))}
               </div>

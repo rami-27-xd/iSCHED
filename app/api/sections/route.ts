@@ -30,7 +30,11 @@ export async function GET(req: Request) {
       },
       include: {
         yearLevel: {
-          include: { program: { include: { department: true } } },
+          include: {
+            program: {
+              include: { department: { include: { college: { select: { abbreviation: true } } } } },
+            },
+          },
         },
       },
       orderBy: { name: "asc" },

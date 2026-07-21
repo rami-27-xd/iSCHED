@@ -15,6 +15,10 @@ export async function GET(req: Request) {
       where: { ...(collegeId ? { collegeId } : {}) },
       include: {
         college: true,
+        programs: {
+          select: { id: true, name: true, abbreviation: true },
+          orderBy: { abbreviation: "asc" },
+        },
         _count: { select: { faculty: true, subjects: true, programs: true } },
       },
       orderBy: { name: "asc" },

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 import { getAuthenticatedUser, getCurrentUser, getUserDepartmentId } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { SchedulingEngine, SchedulingError, type GenerationResult, type LockedEntry } from "@/lib/services/scheduler"
+import { getCurriculumCodes, hasCurriculumMap } from "@/lib/curriculum-map"
+import { CLUSTER_GEC_CODES } from "@/lib/services/subject-permissions"
 import { apiResponse, apiError } from "@/lib/api-helpers"
 import { createNotification } from "@/lib/notifications"
 import { syncFacultySpecializations } from "@/lib/services/sync-specializations"
@@ -89,16 +91,8 @@ export async function POST(
       casClusterProgramIds = clusterProgs.map((p: any) => p.id)
     }
 
-    // Per-cluster GEC/GEL subject codes (from the compliance specification).
-    // Each Dept Chair generates ONLY the GEC subjects assigned to their cluster.
-    // NSTP/PATHFIT are excluded system-wide (manually scheduled).
-    const CLUSTER_GEC_CODES: Record<string, string[]> = {
-      "Social Sciences":                         ["GEC01", "GEC02", "GEC03", "GEC04", "GEC09", "GEL07", "GEL10"],
-      "Languages, Literature, and Humanities":   ["GEC06", "GEC07", "GEC10", "GEC11", "GEC12", "GEC13", "GEC14"],
-      "Mathematics and Natural Sciences":        ["GEC05", "GEC08", "GEL01"],
-    }
-
-    // Resolve cluster GEC codes for this CAS chair.
+    // Resolve cluster GEC codes for this CAS chair (mapping lives in
+    // lib/services/subject-permissions.ts — shared with manual-entry checks).
     // NSTP/PATHFIT are always excluded from auto-generation (manually scheduled).
     let clusterGecCodes: string[] = []
     if (isCasAdmin && (dbUser as any).clusterId) {
@@ -200,6 +194,11 @@ export async function POST(
       ? (programDepartmentId ?? schedule.departmentId ?? undefined)
       : (getUserDepartmentId(dbUser) ?? schedule.departmentId ?? undefined)
 
+    // Department that room access is scoped against for this run.
+    const roomScopeDeptId: string | undefined = isCasInjectingOther
+      ? (schedule.departmentId ?? deptId)
+      : deptId
+
     // Prefixes excluded from all auto-generation (NSTP/PATHFIT are manually scheduled)
     const EXCLUDED_AUTO = ["NSTP", "NST", "PATHFIT", "PATHFit"]
     const notAutoExcluded = { AND: EXCLUDED_AUTO.map(p => ({ code: { not: { startsWith: p } } })) }
@@ -279,33 +278,35 @@ export async function POST(
         },
       }),
       db.room.findMany({
-        where: (() => {
-          // When injecting GEC into another dept's schedule, scope rooms to that dept
-          // (GEC classes run in the target dept's buildings, not CAS buildings).
-          const roomDeptId = isCasInjectingOther ? (schedule.departmentId ?? deptId) : deptId
-          return {
-            isActive: true,
-            ...(roomDeptId ? {
-              AND: [
-                {
-                  building: {
-                    OR: [
-                      { departments: { none: {} } },
-                      { departments: { some: { departmentId: roomDeptId } } },
-                    ],
-                  },
-                },
-                {
+        // When injecting GEC into another dept's schedule, scope rooms to that dept
+        // (GEC classes run in the target dept's buildings, not CAS buildings).
+        // A room qualifies when it is fully unrestricted, restricted to this
+        // department, or restricted to a specific program (course) of this
+        // department — the engine then narrows program-restricted rooms to the
+        // matching program's sections only.
+        where: {
+          isActive: true,
+          ...(roomScopeDeptId ? {
+            AND: [
+              {
+                building: {
                   OR: [
                     { departments: { none: {} } },
-                    { departments: { some: { departmentId: roomDeptId } } },
+                    { departments: { some: { departmentId: roomScopeDeptId } } },
                   ],
                 },
-              ],
-            } : {}),
-          }
-        })(),
-        include: { building: true, departments: true },
+              },
+              {
+                OR: [
+                  { AND: [{ departments: { none: {} } }, { programs: { none: {} } }] },
+                  { departments: { some: { departmentId: roomScopeDeptId } } },
+                  { programs: { some: { program: { departmentId: roomScopeDeptId } } } },
+                ],
+              },
+            ],
+          } : {}),
+        },
+        include: { building: true, departments: true, programs: true },
       }),
       db.section.findMany({
         where: isAdmin
@@ -315,18 +316,54 @@ export async function POST(
               // BAComm/BAHist/etc. (CAS sections) must NOT appear here.
               { yearLevel: { program: { departmentId: schedule.departmentId ?? undefined } } }
             : isCasOwnSchedule
-              ? // Own CAS schedule: cluster program sections only.
-                casClusterProgramIds
-                  ? { yearLevel: { programId: { in: casClusterProgramIds } } }
-                  : { yearLevel: { program: { departmentId: deptId } } }
+              ? // Own CAS schedule: ALL CAS sections. Cluster majors are constrained
+                // to cluster programs via programId matching, but the cluster's GEC
+                // codes inject into every CAS program's sections (per compliance spec:
+                // e.g. the MNS chair schedules GEC05/GEC08/GEL01 for BAComm too).
+                { yearLevel: { program: { departmentId: deptId } } }
             : {
                 // Non-CAS SUPER_ADMIN: only sections from programs whose Program Chair
                 // has submitted a schedule.
                 yearLevel: { programId: { in: submittedProgramIds } },
               },
-        include: { yearLevel: { include: { program: true } } },
+        include: {
+          yearLevel: {
+            include: {
+              program: {
+                include: { department: { include: { college: { select: { abbreviation: true } } } } },
+              },
+            },
+          },
+        },
       }),
     ])
+
+    // GEC/shared subjects (programId=null) have a per-program year/semester
+    // placement that a single Subject.year value cannot express (GEC11 is Year 1
+    // for CIT but Year 2 for BAComm). Resolve the exact allowed sections from the
+    // curriculum map for the schedule's semester. Sections whose program has no
+    // curriculum map fall back to the engine's year-match rule.
+    const mapSemType = schedule.semester?.type as "FIRST" | "SECOND" | undefined
+    function gecAllowedSectionIds(subj: any): string[] | null {
+      if (subj.programId) return null          // majors: programId+year matching is correct
+      if (!mapSemType) return null             // no semester context — keep default behavior
+      const allowed: string[] = []
+      for (const sec of sections as any[]) {
+        const progAbbr = sec.yearLevel?.program?.abbreviation
+        const yl = sec.yearLevel?.level
+        if (!progAbbr || !yl) continue
+        if (hasCurriculumMap(progAbbr)) {
+          const codes = getCurriculumCodes(progAbbr, yl, mapSemType)
+          if (codes.some((c: string) => c.toLowerCase() === subj.code.toLowerCase())) {
+            allowed.push(sec.id)
+          }
+        } else if (yl === (subj.year ?? 1)) {
+          // Unmapped program — preserve the engine's default year match
+          allowed.push(sec.id)
+        }
+      }
+      return allowed
+    }
 
     // Transform data for the scheduling engine
     const subjectInputs = subjects.map((s: any) => ({
@@ -341,6 +378,7 @@ export async function POST(
       year: s.year ?? 1,
       programId: s.programId ?? null,
       requiredLabSpecialization: s.requiredLabSpecialization ?? null,
+      allowedSectionIds: gecAllowedSectionIds(s),
     }))
 
     const facultyInputs = faculty.map((f: any) => ({
@@ -358,20 +396,35 @@ export async function POST(
       allowedBuildingIds: f.buildingAvailability.map((b: any) => b.buildingId),
     }))
 
-    const roomInputs = rooms.map((r: any) => ({
-      id: r.id,
-      code: r.code,
-      type: r.type,
-      buildingId: r.building?.id ?? r.buildingId,
-      buildingCode: r.building?.code,
-      labSpecialization: r.labSpecialization ?? null,
-    }))
+    const roomInputs = rooms.map((r: any) => {
+      // Union semantics: if the room is unrestricted, or its department
+      // restrictions cover this run's department, every section may use it.
+      // Otherwise it qualified via a program (course) restriction — the engine
+      // must limit it to sections of those programs (Hard Constraint).
+      const deptEntries = r.departments ?? []
+      const programEntries = r.programs ?? []
+      const openToWholeDept =
+        (deptEntries.length === 0 && programEntries.length === 0) ||
+        deptEntries.some((d: any) => d.departmentId === roomScopeDeptId)
+      return {
+        id: r.id,
+        code: r.code,
+        type: r.type,
+        buildingId: r.building?.id ?? r.buildingId,
+        buildingCode: r.building?.code,
+        labSpecialization: r.labSpecialization ?? null,
+        allowedProgramIds: openToWholeDept ? [] : programEntries.map((p: any) => p.programId),
+      }
+    })
 
     const sectionInputs = sections.map((s: any) => ({
       id: s.id,
       name: s.name,
       yearLevel: s.yearLevel?.level ?? 1,
       programId: s.yearLevel?.programId ?? null,
+      // Saturday classes are reserved for CAM (College of Allied Medicine) sections
+      // and NSTP subjects — the engine enforces this as a hard constraint.
+      allowSaturday: s.yearLevel?.program?.department?.college?.abbreviation === "CAM",
     }))
 
     // Pre-flight: sections must exist
@@ -552,18 +605,14 @@ export async function POST(
       ? { scheduleId: id, subjectId: { in: subjectIds }, sectionId: { in: sectionIds } }
       : { scheduleId: id, subjectId: { in: subjectIds } }
 
-    // Unassigned-queue delete scope:
-    //   CAS chair on OWN schedule — wipe by SECTION. Subject-scoped deletes miss stale
-    //     entries whose subjects changed programId between runs (e.g. FLS moved
-    //     BAComm → BAHist). Their cluster sections belong to them alone, so this is safe.
-    //   CAS chair INJECTING another dept — wipe only their own GEC rows (subject+section).
-    //     A section-wide wipe here would erase the target dept chair's unassigned queue.
-    //   Everyone else — wipe by subject (their own generation scope).
-    const unassignedDeleteWhere = isCasInjectingOther
+    // Unassigned-queue delete scope: mirror the entry delete — only this run's
+    // subjects × sections. The section pool now spans ALL CAS sections for cluster
+    // chairs (GEC injects university-wide), so a section-wide wipe would erase
+    // other chairs' queues. Stale rows from re-scoped subjects are handled by
+    // prisma/cleanup-cross-dept-entries.ts.
+    const unassignedDeleteWhere = isCasAdmin && casClusterProgramIds
       ? { scheduleId: id, subjectId: { in: subjectIds }, sectionId: { in: sectionIds } }
-      : isCasAdmin && casClusterProgramIds
-        ? { scheduleId: id, sectionId: { in: sectionIds } }
-        : { scheduleId: id, subjectId: { in: subjectIds } }
+      : { scheduleId: id, subjectId: { in: subjectIds } }
 
     await db.scheduleEntry.deleteMany({ where: entryDeleteWhere })
     await db.unassignedEntry.deleteMany({ where: unassignedDeleteWhere })
